@@ -2,8 +2,19 @@
 <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
   <channel>
     <title>OpenGranola Updates</title>
-    <link>https://yazinsai.github.io/OpenGranola/appcast.xml</link>
+    <link>https://raw.githubusercontent.com/yazinsai/OpenGranola/gh-pages/appcast.xml</link>
     <description>Most recent updates to OpenGranola</description>
     <language>en</language>
+    <item>
+      <title>Version 1.4.0</title>
+      <pubDate>Tue, 17 Mar 2026 19:35:22 +0000</pubDate>
+      <sparkle:version>1.4.0</sparkle:version>
+      <sparkle:shortVersionString>1.4.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+      <enclosure url="https://github.com/yazinsai/OpenGranola/releases/download/v1.4.0/OpenGranola.dmg"
+       sparkle:edSignature="D7tjAGZFutMX3bx0J9yxNP03bGYxHAn8xH8V8JRHvnf4z72lR4s4/zMCaKQKoE0IeyG59cxvrti4wvI1/HQaBQ=="
+       length="5218381"
+       type="application/octet-stream" />
+    </item>
   </channel>
 </rss>
