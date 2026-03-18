@@ -89,6 +89,14 @@ enum TranscriptionModel: String, CaseIterable, Identifiable {
         default: nil
         }
     }
+
+    func makeBackend() -> any TranscriptionBackend {
+        switch self {
+        case .parakeetV2: return ParakeetBackend(version: .v2)
+        case .parakeetV3: return ParakeetBackend(version: .v3)
+        case .qwen3ASR06B: return Qwen3Backend()
+        }
+    }
 }
 
 enum EmbeddingProvider: String, CaseIterable, Identifiable {
