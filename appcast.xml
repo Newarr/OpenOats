@@ -1,19 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
   <channel>
-    <title>OpenGranola Updates</title>
-    <link>https://raw.githubusercontent.com/yazinsai/OpenGranola/gh-pages/appcast.xml</link>
-    <description>Most recent updates to OpenGranola</description>
+    <title>OpenOats Updates</title>
+    <link>https://raw.githubusercontent.com/yazinsai/OpenOats/gh-pages/appcast.xml</link>
+    <description>Most recent updates to OpenOats</description>
     <language>en</language>
     <item>
-      <title>Version 1.5.0</title>
-      <pubDate>Wed, 18 Mar 2026 07:08:13 +0000</pubDate>
-      <sparkle:version>1.5.0</sparkle:version>
-      <sparkle:shortVersionString>1.5.0</sparkle:shortVersionString>
+      <title>Version 1.6.0</title>
+      <pubDate>Wed, 18 Mar 2026 09:59:25 +0000</pubDate>
+      <sparkle:version>1.6.0</sparkle:version>
+      <sparkle:shortVersionString>1.6.0</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
-      <enclosure url="https://github.com/yazinsai/OpenGranola/releases/download/v1.5.0/OpenGranola.dmg"
-       sparkle:edSignature="LNbnP73p+sM9Zm7UtRew5bB3841mxpKlz5g1sVRANZG9Au+m9q6T93ecwYkbyHW78NFtM3Y+wlJm8bF0XGO1Aw=="
-       length="5452861"
+      <enclosure url="https://github.com/yazinsai/OpenOats/releases/download/v1.6.0/OpenOats.dmg"
+       sparkle:edSignature="HdS5vCnOirz4O2W7+UpOyDNBVYMw0AR9zHCc3aY5yZH5q9IEiTtR9Y80ga8jOiC79NrY1Hb90hSWiv0T6Y65Dw=="
+       length="5477811"
        type="application/octet-stream" />
     </item>
   </channel>
