@@ -4,7 +4,7 @@ import FluidAudio
 import Observation
 import os
 
-/// Simple file logger for diagnostics — writes to /tmp/opengranola.log
+/// Simple file logger for diagnostics — writes to /tmp/openoats.log
 func diagLog(_ msg: String) {
     let line = "\(Date()): \(msg)\n"
     let path = "/tmp/openoats.log"
