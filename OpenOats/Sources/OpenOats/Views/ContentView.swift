@@ -281,6 +281,25 @@ struct ContentView: View {
             refreshViewState()
             indexKBIfNeeded()
             handlePendingExternalCommandIfPossible()
+
+            // Purge recently deleted sessions older than 24h
+            await coordinator.sessionStore.purgeRecentlyDeleted()
+
+            // Setup meeting detection if enabled
+            if settings.meetingAutoDetectEnabled {
+                coordinator.setupMeetingDetection(settings: settings)
+                await coordinator.evaluateImmediate()
+            }
+        }
+        .onChange(of: settings.meetingAutoDetectEnabled) {
+            if settings.meetingAutoDetectEnabled {
+                coordinator.setupMeetingDetection(settings: settings)
+                Task {
+                    await coordinator.evaluateImmediate()
+                }
+            } else {
+                coordinator.teardownMeetingDetection()
+            }
         }
     }
 
@@ -384,6 +403,9 @@ struct ContentView: View {
     }
 
     private func handleNewUtterance(_ last: Utterance) {
+        // Reset silence timer for auto-detected sessions
+        coordinator.noteUtterance()
+
         // Persist to transcript log
         Task {
             await coordinator.transcriptLogger?.append(

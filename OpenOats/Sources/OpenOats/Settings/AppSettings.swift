@@ -362,6 +362,38 @@ final class AppSettings {
         }
     }
 
+    // MARK: - Meeting Detection
+
+    /// Whether automatic meeting detection is enabled.
+    var meetingAutoDetectEnabled: Bool {
+        didSet { UserDefaults.standard.set(meetingAutoDetectEnabled, forKey: "meetingAutoDetectEnabled") }
+    }
+
+    /// Whether the explanation sheet for auto-detect has been shown.
+    var hasShownAutoDetectExplanation: Bool {
+        didSet { UserDefaults.standard.set(hasShownAutoDetectExplanation, forKey: "hasShownAutoDetectExplanation") }
+    }
+
+    /// Whether the user has seen the suggestion to enable Launch at Login.
+    var hasSeenLaunchAtLoginSuggestion: Bool {
+        didSet { UserDefaults.standard.set(hasSeenLaunchAtLoginSuggestion, forKey: "hasSeenLaunchAtLoginSuggestion") }
+    }
+
+    /// Minutes of mic silence before auto-stopping a detected session.
+    var silenceTimeoutMinutes: Int {
+        didSet { UserDefaults.standard.set(silenceTimeoutMinutes, forKey: "silenceTimeoutMinutes") }
+    }
+
+    /// User-added meeting app bundle IDs beyond the built-in list.
+    var customMeetingAppBundleIDs: [String] {
+        didSet { UserDefaults.standard.set(customMeetingAppBundleIDs, forKey: "customMeetingAppBundleIDs") }
+    }
+
+    /// When true, detection events are logged to the console.
+    var detectionLogEnabled: Bool {
+        didSet { UserDefaults.standard.set(detectionLogEnabled, forKey: "detectionLogEnabled") }
+    }
+
     init() {
         let defaults = UserDefaults.standard
 
@@ -402,6 +434,15 @@ final class AppSettings {
         } else {
             self._showLiveTranscript = defaults.bool(forKey: "showLiveTranscript")
         }
+
+        // Meeting detection
+        self.meetingAutoDetectEnabled = defaults.bool(forKey: "meetingAutoDetectEnabled")
+        self.hasShownAutoDetectExplanation = defaults.bool(forKey: "hasShownAutoDetectExplanation")
+        self.hasSeenLaunchAtLoginSuggestion = defaults.bool(forKey: "hasSeenLaunchAtLoginSuggestion")
+        self.silenceTimeoutMinutes = defaults.object(forKey: "silenceTimeoutMinutes") != nil
+            ? defaults.integer(forKey: "silenceTimeoutMinutes") : 15
+        self.customMeetingAppBundleIDs = defaults.stringArray(forKey: "customMeetingAppBundleIDs") ?? []
+        self.detectionLogEnabled = defaults.bool(forKey: "detectionLogEnabled")
 
         // Default to true (hidden) if key has never been set
         if defaults.object(forKey: "hideFromScreenShare") == nil {
