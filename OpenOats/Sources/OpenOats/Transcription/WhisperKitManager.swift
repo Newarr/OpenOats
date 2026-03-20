@@ -108,15 +108,11 @@ final class WhisperKitManager: @unchecked Sendable {
     /// Check whether the model files already exist locally.
     static func modelExists(variant: Variant) -> Bool {
         let fm = FileManager.default
-        // WhisperKit downloads models into ~/Library/Caches/huggingface/models/argmaxinc/whisperkit-coreml/
-        // and then into a subfolder matching the variant. We check if any compiled model
-        // folder exists. A simpler heuristic: check the default download location.
-        let cachesDir = fm.urls(for: .cachesDirectory, in: .userDomainMask).first
-        guard let cachesDir else { return false }
+        // Swift Hub library downloads to ~/Documents/huggingface/models/ by default.
+        let documentsDir = fm.urls(for: .documentDirectory, in: .userDomainMask).first
+        guard let documentsDir else { return false }
 
-        // WhisperKit stores models under:
-        // ~/Library/Caches/huggingface/models/argmaxinc/whisperkit-coreml/openai_whisper-{variant}
-        let hfCacheDir = cachesDir
+        let hfCacheDir = documentsDir
             .appendingPathComponent("huggingface")
             .appendingPathComponent("models")
             .appendingPathComponent("argmaxinc")
