@@ -469,6 +469,7 @@ struct ContentView: View {
         let activeModelRaw = switch settings.llmProvider {
         case .openRouter: settings.selectedModel
         case .ollama: settings.ollamaLLMModel
+        case .mlx: settings.mlxModel
         }
 
         var nextViewState = ViewState()
