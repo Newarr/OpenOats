@@ -27,11 +27,14 @@ final class WhisperKitManager: @unchecked Sendable {
     }
 
     private let variant: Variant
+    private let customVocabulary: String
     private var pipe: WhisperKit?
+    private var promptTokens: [Int]?
     private let log = Logger(subsystem: "com.openoats", category: "WhisperKitManager")
 
-    init(variant: Variant) {
+    init(variant: Variant, customVocabulary: String = "") {
         self.variant = variant
+        self.customVocabulary = customVocabulary
     }
 
     /// Download and initialize the WhisperKit pipeline.
@@ -58,6 +61,21 @@ final class WhisperKitManager: @unchecked Sendable {
         )
         let whisperKit = try await WhisperKit(config)
         self.pipe = whisperKit
+
+        // Tokenize custom vocabulary for prompt conditioning
+        let vocab = customVocabulary.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !vocab.isEmpty, let tokenizer = whisperKit.tokenizer {
+            let terms = vocab
+                .split(separator: "\n")
+                .map { line -> String in
+                    let preferred = line.split(separator: ":").first ?? line
+                    return String(preferred).trimmingCharacters(in: .whitespaces)
+                }
+                .filter { !$0.isEmpty }
+            let promptText = terms.joined(separator: ", ")
+            self.promptTokens = tokenizer.encode(text: " " + promptText)
+                .filter { $0 < tokenizer.specialTokens.specialTokenBegin }
+        }
     }
 
     /// Transcribe a segment of 16kHz mono Float32 audio samples.
@@ -75,6 +93,7 @@ final class WhisperKitManager: @unchecked Sendable {
             usePrefillPrompt: true,
             detectLanguage: true,
             wordTimestamps: false,
+            promptTokens: promptTokens,
             compressionRatioThreshold: 2.4,
             logProbThreshold: -1.0,
             firstTokenLogProbThreshold: -1.5,

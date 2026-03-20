@@ -109,10 +109,10 @@ enum TranscriptionModel: String, CaseIterable, Identifiable {
         case .parakeetV2: return ParakeetBackend(version: .v2, customVocabulary: customVocabulary)
         case .parakeetV3: return ParakeetBackend(version: .v3, customVocabulary: customVocabulary)
         case .qwen3ASR06B: return Qwen3Backend()
-        case .whisperBase: return WhisperKitBackend(variant: .base)
-        case .whisperSmall: return WhisperKitBackend(variant: .small)
-        case .whisperLargeV3: return WhisperKitBackend(variant: .largeV3)
-        case .whisperLargeV3Turbo: return WhisperKitBackend(variant: .largeV3Turbo)
+        case .whisperBase: return WhisperKitBackend(variant: .base, customVocabulary: customVocabulary)
+        case .whisperSmall: return WhisperKitBackend(variant: .small, customVocabulary: customVocabulary)
+        case .whisperLargeV3: return WhisperKitBackend(variant: .largeV3, customVocabulary: customVocabulary)
+        case .whisperLargeV3Turbo: return WhisperKitBackend(variant: .largeV3Turbo, customVocabulary: customVocabulary)
         }
     }
 }

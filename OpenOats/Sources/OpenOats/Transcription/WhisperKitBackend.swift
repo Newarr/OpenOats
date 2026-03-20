@@ -5,10 +5,12 @@ import Foundation
 final class WhisperKitBackend: TranscriptionBackend, @unchecked Sendable {
     let displayName: String
     private let variant: WhisperKitManager.Variant
+    private let customVocabulary: String
     private var whisperManager: WhisperKitManager?
 
-    init(variant: WhisperKitManager.Variant) {
+    init(variant: WhisperKitManager.Variant, customVocabulary: String = "") {
         self.variant = variant
+        self.customVocabulary = customVocabulary
         self.displayName = switch variant {
             case .base: "Whisper Base"
             case .small: "Whisper Small"
@@ -26,7 +28,7 @@ final class WhisperKitBackend: TranscriptionBackend, @unchecked Sendable {
 
     func prepare(onStatus: @Sendable (String) -> Void) async throws {
         onStatus("Downloading \(displayName)...")
-        let manager = WhisperKitManager(variant: variant)
+        let manager = WhisperKitManager(variant: variant, customVocabulary: customVocabulary)
         try await manager.setup()
         self.whisperManager = manager
     }
