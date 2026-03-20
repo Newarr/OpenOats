@@ -33,20 +33,45 @@ final class TranscriptCleanupEngine {
     private let client = OpenRouterClient()
     private var currentTask: Task<[SessionRecord], Never>?
 
-    /// The system prompt instructing the LLM how to clean up transcripts.
-    private nonisolated static let systemPrompt = """
-        You are a transcript cleanup assistant. Your job is to clean up raw speech-to-text output.
+    /// Builds the system prompt instructing the LLM how to clean up transcripts.
+    private nonisolated static func buildSystemPrompt(customVocabulary: String) -> String {
+        var prompt = """
+            You are a transcript cleanup assistant for bilingual meetings. \
+            Speakers may code-switch between Polish and English, especially \
+            for business and technical terminology.
 
-        Rules:
-        - Remove filler words (um, uh, like, you know, sort of, kind of, I mean, basically, actually, right, so, well) \
-        when they add no meaning.
-        - Fix punctuation and capitalization.
-        - Preserve the original meaning exactly. Do not rephrase, summarize, or add content.
-        - Keep the exact same number of lines in the same order.
-        - Each line starts with a timestamp and speaker prefix in the format: [HH:MM:SS] Speaker: text
-        - Return the cleaned lines in the same format, one per line.
-        - Do not add any commentary, explanation, or extra text.
-        """
+            Rules:
+            - Remove filler words in both languages (um, uh, like, you know, right, \
+            so, well, no, wiesz, jakby, znaczy, w sumie, w sensie, nie, tak) \
+            when they add no meaning.
+            - Fix punctuation and capitalization.
+            - Correct wrong-language hallucinations: if the ASR produced Portuguese, \
+            Russian, or other wrong-language text, correct to the most likely \
+            Polish or English word based on context.
+            - Preserve the original meaning exactly. Do not rephrase, summarize, or add content.
+            - Preserve the speaker's language choice per phrase.
+            - Keep the exact same number of lines in the same order.
+            - Each line starts with a timestamp and speaker prefix: [HH:MM:SS] Speaker: text
+            - Return the cleaned lines in the same format, one per line.
+            - Do not add any commentary, explanation, or extra text.
+            """
+
+        let vocab = customVocabulary.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !vocab.isEmpty {
+            let terms = vocab.split(separator: "\n")
+                .compactMap { line -> String? in
+                    let t = line.split(separator: ":").first.map { String($0).trimmingCharacters(in: .whitespaces) }
+                        ?? String(line).trimmingCharacters(in: .whitespaces)
+                    return t.isEmpty ? nil : t
+                }
+                .joined(separator: ", ")
+            if !terms.isEmpty {
+                prompt += "\n- Known proper nouns (use exact spelling): \(terms)"
+            }
+        }
+
+        return prompt
+    }
 
     /// Chunks records into time-based blocks and sends each to an LLM for cleanup.
     /// Returns a new array of `SessionRecord` with `refinedText` populated.
@@ -55,6 +80,7 @@ final class TranscriptCleanupEngine {
         isCleaningUp = true
         chunksCompleted = 0
         error = nil
+        let systemPromptText = Self.buildSystemPrompt(customVocabulary: settings.transcriptionCustomVocabulary)
 
         let apiKey: String?
         let baseURL: URL?
@@ -90,7 +116,7 @@ final class TranscriptCleanupEngine {
         let chunks = Self.chunkRecords(records)
         totalChunks = chunks.count
 
-        let task = Task { [weak self, client, apiKey, baseURL, model] () -> [SessionRecord] in
+        let task = Task { [weak self, client, apiKey, baseURL, model, systemPromptText] () -> [SessionRecord] in
             // Process chunks concurrently (up to 3 at a time) off the main actor.
             let results: [(index: Int, records: [SessionRecord]?)] = await withTaskGroup(
                 of: (Int, [SessionRecord]?).self,
@@ -116,7 +142,8 @@ final class TranscriptCleanupEngine {
                             client: client,
                             apiKey: apiKey,
                             model: model,
-                            baseURL: baseURL
+                            baseURL: baseURL,
+                            systemPrompt: systemPromptText
                         )
                         return (chunkIndex, cleaned)
                     }
@@ -219,7 +246,8 @@ final class TranscriptCleanupEngine {
         client: OpenRouterClient,
         apiKey: String?,
         model: String,
-        baseURL: URL?
+        baseURL: URL?,
+        systemPrompt: String
     ) async -> [SessionRecord]? {
         let lines = records.map { record in
             let label = record.speaker == .you ? "You" : "Them"

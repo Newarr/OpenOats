@@ -16,10 +16,36 @@ actor TranscriptRefinementEngine {
     private let refinementModel = "openai/gpt-4o-mini"
     private let minimumWordCount = 5
 
-    private let systemPrompt = """
-        Clean up this speech transcript: remove filler words (uh, um, like, you know), \
-        fix punctuation, add sentence breaks. Output only the cleaned text.
-        """
+    private static func buildSystemPrompt(customVocabulary: String) -> String {
+        var prompt = """
+            Clean up this speech transcript. The speakers may code-switch between \
+            Polish and English (especially business/technical terminology). Rules:
+            - Remove filler words in both languages (uh, um, like, you know, no, \
+            wiesz, jakby, znaczy, w sumie, w sensie, tak, nie).
+            - Fix punctuation and capitalization.
+            - If a word appears as a wrong-language hallucination (e.g., Portuguese, \
+            Russian, or Ukrainian text where Polish was spoken), correct it to the \
+            most likely Polish or English word based on context.
+            - Preserve the original language choice per phrase.
+            - Output only the cleaned text.
+            """
+
+        let vocab = customVocabulary.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !vocab.isEmpty {
+            let terms = vocab.split(separator: "\n")
+                .compactMap { line -> String? in
+                    let t = line.split(separator: ":").first.map { String($0).trimmingCharacters(in: .whitespaces) }
+                        ?? String(line).trimmingCharacters(in: .whitespaces)
+                    return t.isEmpty ? nil : t
+                }
+                .joined(separator: ", ")
+            if !terms.isEmpty {
+                prompt += "\n- Known proper nouns (use exact spelling): \(terms)"
+            }
+        }
+
+        return prompt
+    }
 
     init(settings: AppSettings, transcriptStore: TranscriptStore) {
         self.settings = settings
@@ -101,6 +127,8 @@ actor TranscriptRefinementEngine {
         let ollamaModel = await MainActor.run { settings.ollamaLLMModel }
         let mlxURL = await MainActor.run { settings.mlxBaseURL }
         let mlxModelName = await MainActor.run { settings.mlxModel }
+        let customVocab = await MainActor.run { settings.transcriptionCustomVocabulary }
+        let systemPromptText = Self.buildSystemPrompt(customVocabulary: customVocab)
 
         switch provider {
         case .openRouter:
@@ -128,7 +156,7 @@ actor TranscriptRefinementEngine {
         }
 
         let messages: [OpenRouterClient.Message] = [
-            .init(role: "system", content: systemPrompt),
+            .init(role: "system", content: systemPromptText),
             .init(role: "user", content: utterance.text)
         ]
 

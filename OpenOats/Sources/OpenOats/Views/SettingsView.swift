@@ -218,7 +218,7 @@ struct SettingsView: View {
                     )
 
                     Text(
-                        "Optional. Boost meeting-specific jargon, names, and product terms for Parakeet TDT v2/v3. Enter one term per line, or use `Preferred Term: alias one, alias two`."
+                        "Optional. Boost meeting-specific terms for recognition accuracy. Used by Parakeet (vocabulary boosting), Whisper (prompt conditioning), and transcript refinement (proper noun correction). Enter one term per line, or use `Preferred Term: alias one, alias two`."
                     )
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
