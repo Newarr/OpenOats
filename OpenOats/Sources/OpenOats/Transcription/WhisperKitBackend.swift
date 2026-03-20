@@ -9,7 +9,12 @@ final class WhisperKitBackend: TranscriptionBackend, @unchecked Sendable {
 
     init(variant: WhisperKitManager.Variant) {
         self.variant = variant
-        self.displayName = variant == .base ? "Whisper Base" : "Whisper Small"
+        self.displayName = switch variant {
+            case .base: "Whisper Base"
+            case .small: "Whisper Small"
+            case .largeV3: "Whisper Large v3"
+            case .largeV3Turbo: "Whisper Large v3 Turbo"
+        }
     }
 
     func checkStatus() -> BackendStatus {

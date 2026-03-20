@@ -95,6 +95,16 @@ final class TranscriptionBackendTests: XCTestCase {
         XCTAssertEqual(backend.displayName, "Whisper Small")
     }
 
+    func testMakeBackendWhisperLargeV3() {
+        let backend = TranscriptionModel.whisperLargeV3.makeBackend()
+        XCTAssertEqual(backend.displayName, "Whisper Large v3")
+    }
+
+    func testMakeBackendWhisperLargeV3Turbo() {
+        let backend = TranscriptionModel.whisperLargeV3Turbo.makeBackend()
+        XCTAssertEqual(backend.displayName, "Whisper Large v3 Turbo")
+    }
+
     // MARK: - Mock Backend (protocol contract)
 
     func testMockBackendPrepareSetStatus() async throws {

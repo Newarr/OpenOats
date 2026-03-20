@@ -42,7 +42,7 @@ final class AppSettingsTests: XCTestCase {
 
     func testTranscriptionModelAllCases() {
         let cases = TranscriptionModel.allCases
-        XCTAssertEqual(cases.count, 5)
+        XCTAssertEqual(cases.count, 7)
     }
 
     func testTranscriptionModelDisplayNames() {
@@ -86,6 +86,21 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertEqual(TranscriptionModel.qwen3ASR06B.localeFieldTitle, "Language Hint")
         XCTAssertEqual(TranscriptionModel.parakeetV2.localeFieldTitle, "Locale")
         XCTAssertEqual(TranscriptionModel.whisperBase.localeFieldTitle, "Locale")
+    }
+
+    func testWhisperLargeV3DisplayName() {
+        XCTAssertEqual(TranscriptionModel.whisperLargeV3.displayName, "Whisper Large v3")
+        XCTAssertEqual(TranscriptionModel.whisperLargeV3Turbo.displayName, "Whisper Large v3 Turbo")
+    }
+
+    func testWhisperLargeV3WhisperVariant() {
+        XCTAssertEqual(TranscriptionModel.whisperLargeV3.whisperVariant, .largeV3)
+        XCTAssertEqual(TranscriptionModel.whisperLargeV3Turbo.whisperVariant, .largeV3Turbo)
+    }
+
+    func testWhisperLargeV3NoExplicitLanguageHint() {
+        XCTAssertFalse(TranscriptionModel.whisperLargeV3.supportsExplicitLanguageHint)
+        XCTAssertFalse(TranscriptionModel.whisperLargeV3Turbo.supportsExplicitLanguageHint)
     }
 
     // MARK: - EmbeddingProvider
