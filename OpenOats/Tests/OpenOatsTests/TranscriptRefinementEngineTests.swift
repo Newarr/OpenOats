@@ -6,18 +6,14 @@ import XCTest
 private actor MockLLMClient: LLMCompleting {
     var responses: [String] = []
     var callCount = 0
-    var lastMessages: [OpenRouterClient.Message] = []
-    var lastModel: String?
-    var lastApiKey: String?
-    var lastBaseURL: URL?
-    var lastTemperature: Double?
+    var calls: [(messages: [ChatMessage], model: String, apiKey: String?, baseURL: URL?, temperature: Double?)] = []
     var shouldThrow = false
     var delay: Duration?
 
     func complete(
         apiKey: String?,
         model: String,
-        messages: [OpenRouterClient.Message],
+        messages: [ChatMessage],
         maxTokens: Int,
         baseURL: URL?,
         temperature: Double?
@@ -25,11 +21,7 @@ private actor MockLLMClient: LLMCompleting {
         if let delay {
             try? await Task.sleep(for: delay)
         }
-        lastMessages = messages
-        lastModel = model
-        lastApiKey = apiKey
-        lastBaseURL = baseURL
-        lastTemperature = temperature
+        calls.append((messages: messages, model: model, apiKey: apiKey, baseURL: baseURL, temperature: temperature))
         let index = callCount
         callCount += 1
         if shouldThrow {
@@ -38,6 +30,12 @@ private actor MockLLMClient: LLMCompleting {
         guard index < responses.count else { return responses.last ?? "" }
         return responses[index]
     }
+
+    var lastMessages: [ChatMessage] { calls.last?.messages ?? [] }
+    var lastModel: String? { calls.last?.model }
+    var lastApiKey: String? { calls.last?.apiKey }
+    var lastBaseURL: URL? { calls.last?.baseURL }
+    var lastTemperature: Double? { calls.last?.temperature }
 }
 
 // MARK: - Helpers
@@ -411,6 +409,84 @@ final class TranscriptRefinementEngineTests: XCTestCase {
         XCTAssertEqual(baseURL?.absoluteString, "http://localhost:8080/v1/chat/completions")
     }
 
+    // MARK: - Invalid Provider URLs
+
+    @MainActor
+    func testInvalidOllamaURLMarksFailed() async {
+        let settings = makeSettings()
+        settings.llmProvider = .ollama
+        settings.ollamaBaseURL = "://invalid"
+        settings.ollamaLLMModel = "llama3"
+        let store = TranscriptStore()
+        let mockClient = MockLLMClient()
+
+        let engine = TranscriptRefinementEngine(settings: settings, transcriptStore: store, client: mockClient)
+
+        let utterance = makeUtterance(text: "Um a sentence that is like long enough to not be skipped")
+        store.append(utterance)
+
+        await engine.refine(utterance)
+        await engine.drain(timeout: .seconds(2))
+
+        XCTAssertEqual(store.utterances.first?.refinementStatus, .failed)
+        let callCount = await mockClient.callCount
+        XCTAssertEqual(callCount, 0, "LLM should not be called with an invalid URL")
+    }
+
+    @MainActor
+    func testInvalidMLXURLMarksFailed() async {
+        let settings = makeSettings()
+        settings.llmProvider = .mlx
+        settings.mlxBaseURL = "://invalid"
+        settings.mlxModel = "my-model"
+        let store = TranscriptStore()
+        let mockClient = MockLLMClient()
+
+        let engine = TranscriptRefinementEngine(settings: settings, transcriptStore: store, client: mockClient)
+
+        let utterance = makeUtterance(text: "Er a sentence that is like long enough to not be skipped")
+        store.append(utterance)
+
+        await engine.refine(utterance)
+        await engine.drain(timeout: .seconds(2))
+
+        XCTAssertEqual(store.utterances.first?.refinementStatus, .failed)
+        let callCount = await mockClient.callCount
+        XCTAssertEqual(callCount, 0, "LLM should not be called with an invalid URL")
+    }
+
+    // MARK: - Queue Cap
+
+    @MainActor
+    func testQueueEvictsOldestWhenCapExceeded() async {
+        let settings = makeSettings()
+        let store = TranscriptStore()
+        let mockClient = MockLLMClient()
+        // Use a delay so tasks stay in-flight, forcing queue buildup
+        await mockClient.setDelay(.seconds(10))
+        await mockClient.setResponses((0..<60).map { "Refined \($0)" })
+
+        let engine = TranscriptRefinementEngine(settings: settings, transcriptStore: store, client: mockClient)
+
+        // Queue 53 utterances (3 will be in-flight, 50 will fill the queue)
+        var utterances: [Utterance] = []
+        for i in 0..<53 {
+            let u = makeUtterance(text: "Um this is like utterance number \(i) with enough words here")
+            store.append(u)
+            utterances.append(u)
+            await engine.refine(u)
+        }
+
+        // The 54th should evict the oldest queued item (index 3, the first in the queue after 3 in-flight)
+        let extra = makeUtterance(text: "Um this is like the extra utterance that triggers eviction now")
+        store.append(extra)
+        await engine.refine(extra)
+
+        // The evicted utterance (index 3) should be marked as skipped
+        let evictedStatus = store.utterances.first(where: { $0.id == utterances[3].id })?.refinementStatus
+        XCTAssertEqual(evictedStatus, .skipped, "Evicted utterance should be marked as skipped")
+    }
+
     // MARK: - Concurrency Bounds
 
     @MainActor
@@ -597,6 +673,33 @@ final class TranscriptRefinementEngineTests: XCTestCase {
 
         let apiKey = await mockClient.lastApiKey
         XCTAssertNil(apiKey, "Empty API key string should become nil")
+    }
+
+    // MARK: - Call History
+
+    @MainActor
+    func testMockRecordsAllCalls() async {
+        let settings = makeSettings()
+        let store = TranscriptStore()
+        let mockClient = MockLLMClient()
+        await mockClient.setDelay(.milliseconds(10))
+        await mockClient.setResponses(["Refined 1.", "Refined 2."])
+
+        let engine = TranscriptRefinementEngine(settings: settings, transcriptStore: store, client: mockClient)
+
+        let u1 = makeUtterance(text: "Uh first utterance with like enough words to pass the filter")
+        let u2 = makeUtterance(text: "Um second utterance that also like has enough words here")
+        store.append(u1)
+        store.append(u2)
+
+        await engine.refine(u1)
+        await engine.refine(u2)
+        await engine.drain(timeout: .seconds(2))
+
+        let calls = await mockClient.calls
+        XCTAssertEqual(calls.count, 2, "Both calls should be recorded")
+        XCTAssertTrue(calls[0].messages[1].content.contains("first utterance"))
+        XCTAssertTrue(calls[1].messages[1].content.contains("second utterance"))
     }
 }
 

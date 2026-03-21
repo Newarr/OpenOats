@@ -85,7 +85,7 @@ final class NotesEngine {
         }
 
         let transcriptText = formatTranscript(transcript)
-        let messages: [OpenRouterClient.Message] = [
+        let messages: [ChatMessage] = [
             .init(role: "system", content: template.systemPrompt),
             .init(role: "user", content: "Here is the meeting transcript:\n\n\(transcriptText)\n\nGenerate the meeting notes in markdown:")
         ]

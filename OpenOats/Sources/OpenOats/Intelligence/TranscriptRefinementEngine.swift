@@ -8,6 +8,7 @@ actor TranscriptRefinementEngine {
     private let transcriptStore: TranscriptStore
 
     private let maxConcurrent = 3
+    private let maxPendingQueueSize = 50
     private var inFlightCount = 0
     private var pendingQueue: [(utterance: Utterance, context: [Utterance])] = []
     private var activeTasks: [UUID: Task<Void, Never>] = [:]
@@ -125,10 +126,7 @@ actor TranscriptRefinementEngine {
         let words = utterance.text.split(separator: " ")
         let isQuestion = utterance.text.contains("?")
         if words.count < minimumWordCount && !isQuestion {
-            let store = transcriptStore
-            await MainActor.run {
-                store.updateRefinedText(id: utterance.id, refinedText: nil, status: .skipped)
-            }
+            await updateStore(id: utterance.id, refinedText: nil, status: .skipped)
             return
         }
 
@@ -136,22 +134,25 @@ actor TranscriptRefinementEngine {
         // Always send questions through (even if they look clean, short questions
         // passed the word-count gate specifically because they're questions).
         if !isQuestion && !Self.needsCleanup(utterance.text) {
-            let store = transcriptStore
-            await MainActor.run {
-                store.updateRefinedText(id: utterance.id, refinedText: nil, status: .skipped)
-            }
+            await updateStore(id: utterance.id, refinedText: nil, status: .skipped)
             return
         }
 
+        // Cap queue depth to prevent unbounded memory growth during prolonged LLM unavailability.
+        if pendingQueue.count >= maxPendingQueueSize {
+            let evicted = pendingQueue.removeFirst()
+            await updateStore(id: evicted.utterance.id, refinedText: nil, status: .skipped)
+        }
+
         pendingQueue.append((utterance: utterance, context: context))
-        drainQueue()
+        dispatchPending()
     }
 
     /// Await all pending and in-flight refinements, with a timeout.
     func drain(timeout: Duration = .seconds(5)) async {
         await withTaskGroup(of: Void.self) { group in
             group.addTask {
-                // Re-check after each round in case taskCompleted spawned new work
+                // Re-check after each round in case didCompleteTask spawned new work.
                 while await self.hasPendingWork {
                     let tasks = await self.snapshotActiveTasks()
                     for task in tasks {
@@ -178,31 +179,40 @@ actor TranscriptRefinementEngine {
 
     // MARK: - Private
 
-    private func drainQueue() {
+    /// Centralized store update to avoid scattered MainActor hops.
+    private func updateStore(id: UUID, refinedText: String?, status: RefinementStatus) async {
+        let store = transcriptStore
+        await MainActor.run {
+            store.updateRefinedText(id: id, refinedText: refinedText, status: status)
+        }
+    }
+
+    private func dispatchPending() {
         while inFlightCount < maxConcurrent, let item = pendingQueue.first {
             pendingQueue.removeFirst()
             inFlightCount += 1
 
-            // Mark as pending on main actor
-            let store = transcriptStore
             let id = item.utterance.id
-            Task { @MainActor in
+
+            // Mark as pending — awaited to ensure status lands before drain() returns.
+            let store = transcriptStore
+            let pendingTask = Task { @MainActor in
                 store.updateRefinedText(id: id, refinedText: nil, status: .pending)
             }
 
-            let task = Task { [weak self] in
-                guard let self else { return }
+            let task = Task {
+                await pendingTask.value
                 await self.performRefinement(item.utterance, context: item.context)
-                await self.taskCompleted(id: id)
+                await self.didCompleteTask(id: id)
             }
             activeTasks[id] = task
         }
     }
 
-    private func taskCompleted(id: UUID) {
+    private func didCompleteTask(id: UUID) {
         activeTasks.removeValue(forKey: id)
         inFlightCount -= 1
-        drainQueue()
+        dispatchPending()
     }
 
     private func performRefinement(_ utterance: Utterance, context: [Utterance]) async {
@@ -211,7 +221,7 @@ actor TranscriptRefinementEngine {
         let model: String
 
         // Read all settings atomically in a single MainActor hop
-        let s = await MainActor.run {
+        let config = await MainActor.run {
             (
                 provider: settings.llmProvider,
                 openRouterKey: settings.openRouterApiKey,
@@ -223,31 +233,33 @@ actor TranscriptRefinementEngine {
                 languages: settings.refinementLanguages
             )
         }
-        let systemPromptText = Self.buildSystemPrompt(languages: s.languages, customVocabulary: s.customVocab)
+        let systemPromptText = Self.buildSystemPrompt(languages: config.languages, customVocabulary: config.customVocab)
 
-        switch s.provider {
+        switch config.provider {
         case .openRouter:
-            apiKey = s.openRouterKey.isEmpty ? nil : s.openRouterKey
+            apiKey = config.openRouterKey.isEmpty ? nil : config.openRouterKey
             baseURL = nil
             model = refinementModel
         case .ollama:
             apiKey = nil
-            let base = s.ollamaURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let base = config.ollamaURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
             guard let url = URL(string: base + "/v1/chat/completions") else {
-                await markFailed(utterance.id)
+                diagLog("[REFINE] invalid Ollama URL: \(config.ollamaURL)")
+                await updateStore(id: utterance.id, refinedText: nil, status: .failed)
                 return
             }
             baseURL = url
-            model = s.ollamaModel
+            model = config.ollamaModel
         case .mlx:
             apiKey = nil
-            let base = s.mlxURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let base = config.mlxURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
             guard let url = URL(string: base + "/v1/chat/completions") else {
-                await markFailed(utterance.id)
+                diagLog("[REFINE] invalid MLX URL: \(config.mlxURL)")
+                await updateStore(id: utterance.id, refinedText: nil, status: .failed)
                 return
             }
             baseURL = url
-            model = s.mlxModelName
+            model = config.mlxModelName
         }
 
         var userContent = ""
@@ -256,7 +268,7 @@ actor TranscriptRefinementEngine {
         }
         userContent += "Clean this utterance:\n" + utterance.text
 
-        let messages: [OpenRouterClient.Message] = [
+        let messages: [ChatMessage] = [
             .init(role: "system", content: systemPromptText),
             .init(role: "user", content: userContent)
         ]
@@ -273,23 +285,15 @@ actor TranscriptRefinementEngine {
 
             let trimmed = refined.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else {
-                await markFailed(utterance.id)
+                diagLog("[REFINE] empty response for utterance \(utterance.id)")
+                await updateStore(id: utterance.id, refinedText: nil, status: .failed)
                 return
             }
 
-            let store = transcriptStore
-            await MainActor.run {
-                store.updateRefinedText(id: utterance.id, refinedText: trimmed, status: .completed)
-            }
+            await updateStore(id: utterance.id, refinedText: trimmed, status: .completed)
         } catch {
-            await markFailed(utterance.id)
-        }
-    }
-
-    private func markFailed(_ id: UUID) async {
-        let store = transcriptStore
-        await MainActor.run {
-            store.updateRefinedText(id: id, refinedText: nil, status: .failed)
+            diagLog("[REFINE] error for utterance \(utterance.id): \(error.localizedDescription)")
+            await updateStore(id: utterance.id, refinedText: nil, status: .failed)
         }
     }
 }

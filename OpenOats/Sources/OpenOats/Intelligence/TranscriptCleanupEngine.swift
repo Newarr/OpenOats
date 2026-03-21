@@ -257,7 +257,7 @@ final class TranscriptCleanupEngine {
 
         let prompt = lines.joined(separator: "\n")
 
-        let messages: [OpenRouterClient.Message] = [
+        let messages: [ChatMessage] = [
             .init(role: "system", content: systemPrompt),
             .init(role: "user", content: prompt),
         ]

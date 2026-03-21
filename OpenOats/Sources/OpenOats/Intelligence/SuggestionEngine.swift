@@ -487,7 +487,7 @@ final class SuggestionEngine {
         previousState: ConversationState,
         recentUtterances: [Utterance],
         latestUtterance: Utterance
-    ) -> [OpenRouterClient.Message] {
+    ) -> [ChatMessage] {
         let encoder = JSONEncoder()
         encoder.outputFormatting = .sortedKeys
         let prevJSON = (try? String(data: encoder.encode(previousState), encoding: .utf8)) ?? "{}"
@@ -532,7 +532,7 @@ final class SuggestionEngine {
         utterance: Utterance,
         trigger: SuggestionTrigger,
         kbResults: [KBResult]
-    ) -> [OpenRouterClient.Message] {
+    ) -> [ChatMessage] {
         let state = transcriptStore.conversationState
         let recentExchange = transcriptStore.recentExchange
 
@@ -600,7 +600,7 @@ final class SuggestionEngine {
         utterance: Utterance,
         decision: SuggestionDecision,
         kbResults: [KBResult]
-    ) -> [OpenRouterClient.Message] {
+    ) -> [ChatMessage] {
         let state = transcriptStore.conversationState
 
         var evidenceText = ""

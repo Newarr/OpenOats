@@ -1,29 +1,12 @@
 import Foundation
 
-/// Protocol for non-streaming LLM completions, enabling test injection.
-protocol LLMCompleting: Sendable {
-    func complete(
-        apiKey: String?,
-        model: String,
-        messages: [OpenRouterClient.Message],
-        maxTokens: Int,
-        baseURL: URL?,
-        temperature: Double?
-    ) async throws -> String
-}
-
 /// Streaming OpenAI-compatible client for OpenRouter API (and Ollama via OpenAI-compatible endpoint).
 actor OpenRouterClient: LLMCompleting {
     private static let defaultBaseURL = URL(string: "https://openrouter.ai/api/v1/chat/completions")!
 
-    struct Message: Codable, Sendable {
-        let role: String
-        let content: String
-    }
-
     struct ChatRequest: Codable {
         let model: String
-        let messages: [Message]
+        let messages: [ChatMessage]
         let stream: Bool
         let max_tokens: Int?
         let temperature: Double?
@@ -33,7 +16,7 @@ actor OpenRouterClient: LLMCompleting {
     func streamCompletion(
         apiKey: String? = nil,
         model: String,
-        messages: [Message],
+        messages: [ChatMessage],
         maxTokens: Int = 1024,
         baseURL: URL? = nil,
         temperature: Double? = nil
@@ -98,7 +81,7 @@ actor OpenRouterClient: LLMCompleting {
     func complete(
         apiKey: String? = nil,
         model: String,
-        messages: [Message],
+        messages: [ChatMessage],
         maxTokens: Int = 512,
         baseURL: URL? = nil,
         temperature: Double? = nil
