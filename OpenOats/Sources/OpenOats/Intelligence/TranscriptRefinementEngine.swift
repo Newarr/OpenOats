@@ -120,13 +120,14 @@ actor TranscriptRefinementEngine {
     }
 
     /// Queue an utterance for refinement, capturing preceding context.
-    func refine(_ utterance: Utterance, context: [Utterance] = []) {
+    func refine(_ utterance: Utterance, context: [Utterance] = []) async {
         // Skip short utterances unless they look like a question
         let words = utterance.text.split(separator: " ")
         let isQuestion = utterance.text.contains("?")
         if words.count < minimumWordCount && !isQuestion {
-            Task { @MainActor in
-                transcriptStore.updateRefinedText(id: utterance.id, refinedText: nil, status: .skipped)
+            let store = transcriptStore
+            await MainActor.run {
+                store.updateRefinedText(id: utterance.id, refinedText: nil, status: .skipped)
             }
             return
         }
@@ -135,8 +136,9 @@ actor TranscriptRefinementEngine {
         // Always send questions through (even if they look clean, short questions
         // passed the word-count gate specifically because they're questions).
         if !isQuestion && !Self.needsCleanup(utterance.text) {
-            Task { @MainActor in
-                transcriptStore.updateRefinedText(id: utterance.id, refinedText: nil, status: .skipped)
+            let store = transcriptStore
+            await MainActor.run {
+                store.updateRefinedText(id: utterance.id, refinedText: nil, status: .skipped)
             }
             return
         }
@@ -147,13 +149,14 @@ actor TranscriptRefinementEngine {
 
     /// Await all pending and in-flight refinements, with a timeout.
     func drain(timeout: Duration = .seconds(5)) async {
-        guard inFlightCount > 0 || !pendingQueue.isEmpty else { return }
-
-        let tasks = activeTasks.values.map { $0 }
         await withTaskGroup(of: Void.self) { group in
             group.addTask {
-                for task in tasks {
-                    await task.value
+                // Re-check after each round in case taskCompleted spawned new work
+                while await self.hasPendingWork {
+                    let tasks = await self.snapshotActiveTasks()
+                    for task in tasks {
+                        await task.value
+                    }
                 }
             }
             group.addTask {
@@ -163,6 +166,14 @@ actor TranscriptRefinementEngine {
             await group.next()
             group.cancelAll()
         }
+    }
+
+    private var hasPendingWork: Bool {
+        inFlightCount > 0 || !pendingQueue.isEmpty
+    }
+
+    private func snapshotActiveTasks() -> [Task<Void, Never>] {
+        Array(activeTasks.values)
     }
 
     // MARK: - Private
@@ -267,7 +278,7 @@ actor TranscriptRefinementEngine {
             }
 
             let store = transcriptStore
-            Task { @MainActor in
+            await MainActor.run {
                 store.updateRefinedText(id: utterance.id, refinedText: trimmed, status: .completed)
             }
         } catch {
@@ -277,7 +288,7 @@ actor TranscriptRefinementEngine {
 
     private func markFailed(_ id: UUID) async {
         let store = transcriptStore
-        Task { @MainActor in
+        await MainActor.run {
             store.updateRefinedText(id: id, refinedText: nil, status: .failed)
         }
     }

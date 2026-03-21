@@ -158,7 +158,7 @@ final class TranscriptRefinementEngineTests: XCTestCase {
     // MARK: - Short Utterance Skipping
 
     @MainActor
-    func testShortUtteranceIsSkipped() async throws {
+    func testShortUtteranceIsSkipped() async {
         let settings = makeSettings()
         let store = TranscriptStore()
         let mockClient = MockLLMClient()
@@ -169,7 +169,6 @@ final class TranscriptRefinementEngineTests: XCTestCase {
         store.append(short)
 
         await engine.refine(short)
-        try await Task.sleep(for: .milliseconds(50))
 
         XCTAssertEqual(store.utterances.first?.refinementStatus, .skipped)
         let callCount = await mockClient.callCount
@@ -177,7 +176,7 @@ final class TranscriptRefinementEngineTests: XCTestCase {
     }
 
     @MainActor
-    func testShortQuestionIsNotSkipped() async throws {
+    func testShortQuestionIsNotSkipped() async {
         let settings = makeSettings()
         let store = TranscriptStore()
         let mockClient = MockLLMClient()
@@ -190,7 +189,6 @@ final class TranscriptRefinementEngineTests: XCTestCase {
 
         await engine.refine(question)
         await engine.drain(timeout: .seconds(2))
-        try await Task.sleep(for: .milliseconds(50))
 
         let callCount = await mockClient.callCount
         XCTAssertEqual(callCount, 1, "Questions should be refined even if short")
@@ -199,7 +197,7 @@ final class TranscriptRefinementEngineTests: XCTestCase {
     // MARK: - Detect-then-correct Skipping
 
     @MainActor
-    func testCleanUtteranceIsSkipped() async throws {
+    func testCleanUtteranceIsSkipped() async {
         let settings = makeSettings()
         let store = TranscriptStore()
         let mockClient = MockLLMClient()
@@ -210,7 +208,6 @@ final class TranscriptRefinementEngineTests: XCTestCase {
         store.append(clean)
 
         await engine.refine(clean)
-        try await Task.sleep(for: .milliseconds(50))
 
         XCTAssertEqual(store.utterances.first?.refinementStatus, .skipped)
         let callCount = await mockClient.callCount
@@ -218,7 +215,7 @@ final class TranscriptRefinementEngineTests: XCTestCase {
     }
 
     @MainActor
-    func testDirtyUtteranceIsNotSkipped() async throws {
+    func testDirtyUtteranceIsNotSkipped() async {
         let settings = makeSettings()
         let store = TranscriptStore()
         let mockClient = MockLLMClient()
@@ -231,14 +228,13 @@ final class TranscriptRefinementEngineTests: XCTestCase {
 
         await engine.refine(dirty)
         await engine.drain(timeout: .seconds(2))
-        try await Task.sleep(for: .milliseconds(50))
 
         let callCount = await mockClient.callCount
         XCTAssertEqual(callCount, 1, "Dirty text should be sent to the LLM")
     }
 
     @MainActor
-    func testQuestionBypassesNeedsCleanupCheck() async throws {
+    func testQuestionBypassesNeedsCleanupCheck() async {
         let settings = makeSettings()
         let store = TranscriptStore()
         let mockClient = MockLLMClient()
@@ -252,7 +248,6 @@ final class TranscriptRefinementEngineTests: XCTestCase {
 
         await engine.refine(question)
         await engine.drain(timeout: .seconds(2))
-        try await Task.sleep(for: .milliseconds(50))
 
         let callCount = await mockClient.callCount
         XCTAssertEqual(callCount, 1, "Questions should bypass the needsCleanup check")
@@ -261,7 +256,7 @@ final class TranscriptRefinementEngineTests: XCTestCase {
     // MARK: - Successful Refinement
 
     @MainActor
-    func testSuccessfulRefinementUpdatesStore() async throws {
+    func testSuccessfulRefinementUpdatesStore() async {
         let settings = makeSettings()
         let store = TranscriptStore()
         let mockClient = MockLLMClient()
@@ -274,7 +269,6 @@ final class TranscriptRefinementEngineTests: XCTestCase {
 
         await engine.refine(utterance)
         await engine.drain(timeout: .seconds(2))
-        try await Task.sleep(for: .milliseconds(100))
 
         XCTAssertEqual(store.utterances.first?.refinedText, "This is the cleaned up version of the text.")
         XCTAssertEqual(store.utterances.first?.refinementStatus, .completed)
@@ -283,7 +277,7 @@ final class TranscriptRefinementEngineTests: XCTestCase {
     // MARK: - Temperature
 
     @MainActor
-    func testRefinementUsesTemperatureZero() async throws {
+    func testRefinementUsesTemperatureZero() async {
         let settings = makeSettings()
         let store = TranscriptStore()
         let mockClient = MockLLMClient()
@@ -304,7 +298,7 @@ final class TranscriptRefinementEngineTests: XCTestCase {
     // MARK: - Failure Handling
 
     @MainActor
-    func testLLMErrorMarksAsFailed() async throws {
+    func testLLMErrorMarksAsFailed() async {
         let settings = makeSettings()
         let store = TranscriptStore()
         let mockClient = MockLLMClient()
@@ -317,14 +311,13 @@ final class TranscriptRefinementEngineTests: XCTestCase {
 
         await engine.refine(utterance)
         await engine.drain(timeout: .seconds(2))
-        try await Task.sleep(for: .milliseconds(100))
 
         XCTAssertEqual(store.utterances.first?.refinementStatus, .failed)
         XCTAssertNil(store.utterances.first?.refinedText)
     }
 
     @MainActor
-    func testEmptyResponseMarksAsFailed() async throws {
+    func testEmptyResponseMarksAsFailed() async {
         let settings = makeSettings()
         let store = TranscriptStore()
         let mockClient = MockLLMClient()
@@ -337,7 +330,6 @@ final class TranscriptRefinementEngineTests: XCTestCase {
 
         await engine.refine(utterance)
         await engine.drain(timeout: .seconds(2))
-        try await Task.sleep(for: .milliseconds(100))
 
         XCTAssertEqual(store.utterances.first?.refinementStatus, .failed)
     }
@@ -345,7 +337,7 @@ final class TranscriptRefinementEngineTests: XCTestCase {
     // MARK: - Provider Routing
 
     @MainActor
-    func testOpenRouterProviderUsesCorrectModel() async throws {
+    func testOpenRouterProviderUsesCorrectModel() async {
         let settings = makeSettings()
         settings.llmProvider = .openRouter
         settings.openRouterApiKey = "test-key-123"
@@ -370,7 +362,7 @@ final class TranscriptRefinementEngineTests: XCTestCase {
     }
 
     @MainActor
-    func testOllamaProviderUsesCustomBaseURL() async throws {
+    func testOllamaProviderUsesCustomBaseURL() async {
         let settings = makeSettings()
         settings.llmProvider = .ollama
         settings.ollamaBaseURL = "http://localhost:11434"
@@ -396,7 +388,7 @@ final class TranscriptRefinementEngineTests: XCTestCase {
     }
 
     @MainActor
-    func testMLXProviderUsesCustomBaseURL() async throws {
+    func testMLXProviderUsesCustomBaseURL() async {
         let settings = makeSettings()
         settings.llmProvider = .mlx
         settings.mlxBaseURL = "http://localhost:8080"
@@ -442,7 +434,6 @@ final class TranscriptRefinementEngineTests: XCTestCase {
         XCTAssertLessThanOrEqual(earlyCount, 3, "At most 3 concurrent tasks should start")
 
         await engine.drain(timeout: .seconds(5))
-        try await Task.sleep(for: .milliseconds(100))
 
         let finalCount = await mockClient.callCount
         XCTAssertEqual(finalCount, 6, "All 6 utterances should eventually be refined")
@@ -451,7 +442,7 @@ final class TranscriptRefinementEngineTests: XCTestCase {
     // MARK: - Drain
 
     @MainActor
-    func testDrainReturnsImmediatelyWhenIdle() async throws {
+    func testDrainReturnsImmediatelyWhenIdle() async {
         let settings = makeSettings()
         let store = TranscriptStore()
         let mockClient = MockLLMClient()
@@ -465,7 +456,7 @@ final class TranscriptRefinementEngineTests: XCTestCase {
     // MARK: - User Message Structure
 
     @MainActor
-    func testRefinementSendsSystemAndUserMessages() async throws {
+    func testRefinementSendsSystemAndUserMessages() async {
         let settings = makeSettings()
         let store = TranscriptStore()
         let mockClient = MockLLMClient()
@@ -489,7 +480,7 @@ final class TranscriptRefinementEngineTests: XCTestCase {
     }
 
     @MainActor
-    func testRefinementWithContextIncludesPrecedingUtterances() async throws {
+    func testRefinementWithContextIncludesPrecedingUtterances() async {
         let settings = makeSettings()
         let store = TranscriptStore()
         let mockClient = MockLLMClient()
@@ -518,7 +509,7 @@ final class TranscriptRefinementEngineTests: XCTestCase {
     }
 
     @MainActor
-    func testRefinementWithoutContextOmitsContextBlock() async throws {
+    func testRefinementWithoutContextOmitsContextBlock() async {
         let settings = makeSettings()
         let store = TranscriptStore()
         let mockClient = MockLLMClient()
@@ -541,7 +532,7 @@ final class TranscriptRefinementEngineTests: XCTestCase {
     // MARK: - Language Settings
 
     @MainActor
-    func testRefinementLanguagesAppearInSystemPrompt() async throws {
+    func testRefinementLanguagesAppearInSystemPrompt() async {
         let settings = makeSettings()
         settings.refinementLanguages = "Spanish, French"
         let store = TranscriptStore()
@@ -565,7 +556,7 @@ final class TranscriptRefinementEngineTests: XCTestCase {
     // MARK: - Custom Vocabulary in Prompt
 
     @MainActor
-    func testCustomVocabularyIsIncludedInSystemPrompt() async throws {
+    func testCustomVocabularyIsIncludedInSystemPrompt() async {
         let settings = makeSettings()
         settings.transcriptionCustomVocabulary = "OpenOats\nAcme Corp: company"
         let store = TranscriptStore()
@@ -589,7 +580,7 @@ final class TranscriptRefinementEngineTests: XCTestCase {
     // MARK: - Empty OpenRouter API Key
 
     @MainActor
-    func testEmptyOpenRouterKeyPassesNilApiKey() async throws {
+    func testEmptyOpenRouterKeyPassesNilApiKey() async {
         let settings = makeSettings()
         settings.llmProvider = .openRouter
         let store = TranscriptStore()
