@@ -3,7 +3,7 @@ import Foundation
 /// Refines utterances by cleaning up filler words and fixing punctuation via LLM.
 /// Runs as a background actor with bounded concurrency.
 actor TranscriptRefinementEngine {
-    private let client = OpenRouterClient()
+    private let client: any LLMCompleting
     private let settings: AppSettings
     private let transcriptStore: TranscriptStore
 
@@ -16,7 +16,7 @@ actor TranscriptRefinementEngine {
     private let refinementModel = "openai/gpt-4o-mini"
     private let minimumWordCount = 5
 
-    private static func buildSystemPrompt(customVocabulary: String) -> String {
+    static func buildSystemPrompt(customVocabulary: String) -> String {
         var prompt = """
             Clean up this speech transcript. The speakers may code-switch between \
             Polish and English (especially business/technical terminology). Rules:
@@ -47,9 +47,10 @@ actor TranscriptRefinementEngine {
         return prompt
     }
 
-    init(settings: AppSettings, transcriptStore: TranscriptStore) {
+    init(settings: AppSettings, transcriptStore: TranscriptStore, client: any LLMCompleting = OpenRouterClient()) {
         self.settings = settings
         self.transcriptStore = transcriptStore
+        self.client = client
     }
 
     /// Queue an utterance for refinement.

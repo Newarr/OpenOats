@@ -1,7 +1,18 @@
 import Foundation
 
+/// Protocol for non-streaming LLM completions, enabling test injection.
+protocol LLMCompleting: Sendable {
+    func complete(
+        apiKey: String?,
+        model: String,
+        messages: [OpenRouterClient.Message],
+        maxTokens: Int,
+        baseURL: URL?
+    ) async throws -> String
+}
+
 /// Streaming OpenAI-compatible client for OpenRouter API (and Ollama via OpenAI-compatible endpoint).
-actor OpenRouterClient {
+actor OpenRouterClient: LLMCompleting {
     private static let defaultBaseURL = URL(string: "https://openrouter.ai/api/v1/chat/completions")!
 
     struct Message: Codable, Sendable {
