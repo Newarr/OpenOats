@@ -33,7 +33,7 @@ final class MicCapture: @unchecked Sendable {
         )
     }
 
-    func bufferStream(deviceID: AudioDeviceID? = nil) -> AsyncStream<AVAudioPCMBuffer> {
+    func bufferStream(deviceID: AudioDeviceID? = nil, echoCancellation: Bool = false) -> AsyncStream<AVAudioPCMBuffer> {
         // Defensive cleanup of any prior state
         _streamContinuation.withLock { $0?.finish(); $0 = nil }
         engine.inputNode.removeTap(onBus: 0)
@@ -54,6 +54,16 @@ final class MicCapture: @unchecked Sendable {
 
             let inputNode = engine.inputNode
             diagLog("[MIC-1b] input node ready")
+
+            // Enable voice processing (AEC + noise suppression) if requested
+            if echoCancellation {
+                do {
+                    try inputNode.setVoiceProcessingEnabled(true)
+                    diagLog("[MIC-1c] voice processing (AEC) enabled")
+                } catch {
+                    diagLog("[MIC-1c] failed to enable voice processing: \(error.localizedDescription)")
+                }
+            }
 
             // Set input device before accessing inputNode format
             var resolvedDeviceID: AudioDeviceID?
@@ -104,15 +114,19 @@ final class MicCapture: @unchecked Sendable {
                 return
             }
 
-            guard let tapFormat = AVAudioFormat(
-                standardFormatWithSampleRate: sampleRate,
-                channels: format.channelCount
-            ) else {
-                let msg = "Failed to build tap format from input format"
-                diagLog("[MIC-4-FAIL] \(msg)")
-                errorHolder.value = msg
-                continuation.finish()
-                return
+            // Try multiple tap formats — some devices report formats that don't
+            // round-trip through AVAudioFormat(standardFormat:). Fall back to the
+            // native input format as a last resort.
+            let tapFormat: AVAudioFormat
+            if let f = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: format.channelCount) {
+                tapFormat = f
+            } else if sampleRate != format.sampleRate,
+                      let f = AVAudioFormat(standardFormatWithSampleRate: format.sampleRate, channels: format.channelCount) {
+                diagLog("[MIC-4] hardware-rate format failed, using node rate \(format.sampleRate)")
+                tapFormat = f
+            } else {
+                diagLog("[MIC-4] standard formats failed, using native input format")
+                tapFormat = format
             }
 
             diagLog("[MIC-4] tapFormat: sr=\(tapFormat.sampleRate) ch=\(tapFormat.channelCount)")
