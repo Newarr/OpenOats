@@ -63,22 +63,66 @@ final class TranscriptRefinementEngineTests: XCTestCase {
     // MARK: - buildSystemPrompt
 
     func testBuildSystemPromptWithoutVocabulary() async {
-        let prompt = TranscriptRefinementEngine.buildSystemPrompt(customVocabulary: "")
-        XCTAssertTrue(prompt.contains("Clean up this speech transcript"))
-        XCTAssertTrue(prompt.contains("filler words"))
+        let prompt = TranscriptRefinementEngine.buildSystemPrompt(languages: "English", customVocabulary: "")
+        XCTAssertTrue(prompt.contains("professional transcript editor"))
+        XCTAssertTrue(prompt.contains("speech disfluencies"))
+        XCTAssertTrue(prompt.contains("The speakers use English."))
         XCTAssertFalse(prompt.contains("Known proper nouns"))
     }
 
     func testBuildSystemPromptWithVocabulary() async {
-        let prompt = TranscriptRefinementEngine.buildSystemPrompt(customVocabulary: "Acme Corp\nJohn Doe: CEO")
+        let prompt = TranscriptRefinementEngine.buildSystemPrompt(languages: "English", customVocabulary: "Acme Corp\nJohn Doe: CEO")
         XCTAssertTrue(prompt.contains("Known proper nouns"))
         XCTAssertTrue(prompt.contains("Acme Corp"))
         XCTAssertTrue(prompt.contains("John Doe"))
     }
 
     func testBuildSystemPromptTrimsBlankVocabulary() async {
-        let prompt = TranscriptRefinementEngine.buildSystemPrompt(customVocabulary: "   \n  \n  ")
+        let prompt = TranscriptRefinementEngine.buildSystemPrompt(languages: "English", customVocabulary: "   \n  \n  ")
         XCTAssertFalse(prompt.contains("Known proper nouns"))
+    }
+
+    func testBuildSystemPromptMultipleLanguages() async {
+        let prompt = TranscriptRefinementEngine.buildSystemPrompt(languages: "English, Polish, German", customVocabulary: "")
+        XCTAssertTrue(prompt.contains("English, Polish, German"))
+        XCTAssertTrue(prompt.contains("switch between them"))
+    }
+
+    func testBuildSystemPromptSingleLanguage() async {
+        let prompt = TranscriptRefinementEngine.buildSystemPrompt(languages: "Japanese", customVocabulary: "")
+        XCTAssertTrue(prompt.contains("The speakers use Japanese."))
+        XCTAssertFalse(prompt.contains("switch between"))
+    }
+
+    func testBuildSystemPromptEmptyLanguagesFallsBackToEnglish() async {
+        let prompt = TranscriptRefinementEngine.buildSystemPrompt(languages: "", customVocabulary: "")
+        XCTAssertTrue(prompt.contains("The speakers use English."))
+    }
+
+    func testBuildSystemPromptPreservationRules() async {
+        let prompt = TranscriptRefinementEngine.buildSystemPrompt(languages: "English", customVocabulary: "")
+        XCTAssertTrue(prompt.contains("Do NOT add, remove, or change any substantive content"))
+        XCTAssertTrue(prompt.contains("Do NOT paraphrase or summarize"))
+        XCTAssertTrue(prompt.contains("unclear or ambiguous, keep it as-is"))
+        XCTAssertTrue(prompt.contains("Return the original text unchanged if no cleanup is needed"))
+    }
+
+    // MARK: - buildContextBlock
+
+    func testBuildContextBlockEmpty() async {
+        let result = TranscriptRefinementEngine.buildContextBlock([])
+        XCTAssertNil(result)
+    }
+
+    func testBuildContextBlockFormatsUtterances() async {
+        let context = [
+            makeUtterance(text: "How is the project going?", speaker: .you),
+            makeUtterance(text: "It's going well, we finished the sprint.", speaker: .them),
+        ]
+        let result = TranscriptRefinementEngine.buildContextBlock(context)!
+        XCTAssertTrue(result.contains("Previous context (do not modify):"))
+        XCTAssertTrue(result.contains("Speaker A: How is the project going?"))
+        XCTAssertTrue(result.contains("Speaker B: It's going well"))
     }
 
     // MARK: - Short Utterance Skipping
@@ -331,7 +375,7 @@ final class TranscriptRefinementEngineTests: XCTestCase {
         // If we get here without hanging, the test passes
     }
 
-    // MARK: - System Prompt Includes User Text
+    // MARK: - User Message Structure
 
     @MainActor
     func testRefinementSendsSystemAndUserMessages() async throws {
@@ -351,9 +395,84 @@ final class TranscriptRefinementEngineTests: XCTestCase {
         let messages = await mockClient.lastMessages
         XCTAssertEqual(messages.count, 2)
         XCTAssertEqual(messages[0].role, "system")
-        XCTAssertTrue(messages[0].content.contains("Clean up this speech transcript"))
+        XCTAssertTrue(messages[0].content.contains("professional transcript editor"))
         XCTAssertEqual(messages[1].role, "user")
-        XCTAssertEqual(messages[1].content, "Uh so like we need to discuss the um project timeline")
+        XCTAssertTrue(messages[1].content.contains("Clean this utterance:"))
+        XCTAssertTrue(messages[1].content.contains("Uh so like we need to discuss the um project timeline"))
+    }
+
+    @MainActor
+    func testRefinementWithContextIncludesPrecedingUtterances() async throws {
+        let settings = makeSettings()
+        let store = TranscriptStore()
+        let mockClient = MockLLMClient()
+        await mockClient.setResponses(["We need to discuss the project timeline."])
+
+        let engine = TranscriptRefinementEngine(settings: settings, transcriptStore: store, client: mockClient)
+
+        let context = [
+            makeUtterance(text: "Let's talk about the project.", speaker: .you),
+            makeUtterance(text: "Sure, what aspect?", speaker: .them),
+        ]
+        let utterance = makeUtterance(text: "Uh so like we need to discuss the um project timeline")
+        store.append(context[0])
+        store.append(context[1])
+        store.append(utterance)
+
+        await engine.refine(utterance, context: context)
+        await engine.drain(timeout: .seconds(2))
+
+        let messages = await mockClient.lastMessages
+        let userContent = messages[1].content
+        XCTAssertTrue(userContent.contains("Previous context (do not modify):"))
+        XCTAssertTrue(userContent.contains("Speaker A: Let's talk about the project."))
+        XCTAssertTrue(userContent.contains("Speaker B: Sure, what aspect?"))
+        XCTAssertTrue(userContent.contains("Clean this utterance:"))
+    }
+
+    @MainActor
+    func testRefinementWithoutContextOmitsContextBlock() async throws {
+        let settings = makeSettings()
+        let store = TranscriptStore()
+        let mockClient = MockLLMClient()
+        await mockClient.setResponses(["Cleaned text from the LLM response output."])
+
+        let engine = TranscriptRefinementEngine(settings: settings, transcriptStore: store, client: mockClient)
+
+        let utterance = makeUtterance(text: "A sentence with enough words to not be filtered out")
+        store.append(utterance)
+
+        await engine.refine(utterance)
+        await engine.drain(timeout: .seconds(2))
+
+        let messages = await mockClient.lastMessages
+        let userContent = messages[1].content
+        XCTAssertFalse(userContent.contains("Previous context"))
+        XCTAssertTrue(userContent.hasPrefix("Clean this utterance:"))
+    }
+
+    // MARK: - Language Settings
+
+    @MainActor
+    func testRefinementLanguagesAppearInSystemPrompt() async throws {
+        let settings = makeSettings()
+        settings.refinementLanguages = "Spanish, French"
+        let store = TranscriptStore()
+        let mockClient = MockLLMClient()
+        await mockClient.setResponses(["Texto limpio de la salida del modelo LLM."])
+
+        let engine = TranscriptRefinementEngine(settings: settings, transcriptStore: store, client: mockClient)
+
+        let utterance = makeUtterance(text: "Bueno entonces como que necesitamos discutir el proyecto")
+        store.append(utterance)
+
+        await engine.refine(utterance)
+        await engine.drain(timeout: .seconds(2))
+
+        let messages = await mockClient.lastMessages
+        let systemPrompt = messages[0].content
+        XCTAssertTrue(systemPrompt.contains("Spanish, French"))
+        XCTAssertTrue(systemPrompt.contains("switch between them"))
     }
 
     // MARK: - Custom Vocabulary in Prompt

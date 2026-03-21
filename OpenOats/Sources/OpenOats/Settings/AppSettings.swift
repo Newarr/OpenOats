@@ -470,6 +470,19 @@ final class AppSettings {
         }
     }
 
+    /// Comma-separated list of languages the user speaks in meetings (e.g. "English, Polish").
+    /// Used by transcript refinement to inform the cleanup prompt.
+    @ObservationIgnored nonisolated(unsafe) private var _refinementLanguages: String
+    var refinementLanguages: String {
+        get { access(keyPath: \.refinementLanguages); return _refinementLanguages }
+        set {
+            withMutation(keyPath: \.refinementLanguages) {
+                _refinementLanguages = newValue
+                defaults.set(newValue, forKey: "refinementLanguages")
+            }
+        }
+    }
+
     /// When true, all app windows are invisible to screen sharing / recording.
     @ObservationIgnored nonisolated(unsafe) private var _hideFromScreenShare: Bool
     var hideFromScreenShare: Bool {
@@ -596,6 +609,7 @@ final class AppSettings {
         self._hasAcknowledgedRecordingConsent = defaults.bool(forKey: "hasAcknowledgedRecordingConsent")
         self._saveAudioRecording = defaults.bool(forKey: "saveAudioRecording")
         self._enableTranscriptRefinement = defaults.bool(forKey: "enableTranscriptRefinement")
+        self._refinementLanguages = defaults.string(forKey: "refinementLanguages") ?? "English"
 
         // Echo cancellation — default to enabled
         if defaults.object(forKey: "enableEchoCancellation") == nil {

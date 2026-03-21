@@ -191,6 +191,18 @@ struct SettingsView: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
 
+                if settings.enableTranscriptRefinement {
+                    TextField(
+                        "e.g. English, Polish",
+                        text: $settings.refinementLanguages
+                    )
+                    .font(.system(size: 12, design: .monospaced))
+                    Text("Languages you speak in meetings (comma-separated). Helps the cleanup model understand code-switching and language-specific disfluencies.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Custom Keywords")
                         .font(.system(size: 11, weight: .medium))

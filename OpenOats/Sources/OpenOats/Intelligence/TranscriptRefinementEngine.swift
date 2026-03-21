@@ -9,25 +9,49 @@ actor TranscriptRefinementEngine {
 
     private let maxConcurrent = 3
     private var inFlightCount = 0
-    private var pendingQueue: [Utterance] = []
-    private var activeTasks: [UUID: Task<Void, Never>] = [:]
+    private var pendingQueue: [(utterance: Utterance, context: [Utterance])] = []
+    private var activeTasks: [UUID: Task<Void, Never>] = []
 
     /// Hardcoded cheap model for refinement (keeps cost low).
     private let refinementModel = "openai/gpt-4o-mini"
     private let minimumWordCount = 5
+    private let contextWindowSize = 3
 
-    static func buildSystemPrompt(customVocabulary: String) -> String {
+    static func buildSystemPrompt(languages: String, customVocabulary: String) -> String {
+        let langList = languages
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+
+        let languageClause: String
+        if langList.count > 1 {
+            languageClause = """
+                The speakers use \(langList.joined(separator: ", ")) and may switch \
+                between them freely, especially for technical or business terminology.
+                """
+        } else if let single = langList.first, !single.isEmpty {
+            languageClause = "The speakers use \(single)."
+        } else {
+            languageClause = "The speakers use English."
+        }
+
         var prompt = """
-            Clean up this speech transcript. The speakers may code-switch between \
-            Polish and English (especially business/technical terminology). Rules:
-            - Remove filler words in both languages (uh, um, like, you know, no, \
-            wiesz, jakby, znaczy, w sumie, w sensie, tak, nie).
+            You are a professional transcript editor. Clean up the following speech \
+            transcript segment while strictly preserving the speaker's original meaning, \
+            language, and intent.
+
+            \(languageClause)
+
+            Guidelines:
+            - Remove speech disfluencies: filler words, false starts, and unnecessary repetitions.
             - Fix punctuation and capitalization.
-            - If a word appears as a wrong-language hallucination (e.g., Portuguese, \
-            Russian, or Ukrainian text where Polish was spoken), correct it to the \
-            most likely Polish or English word based on context.
-            - Preserve the original language choice per phrase.
-            - Output only the cleaned text.
+            - Do NOT add, remove, or change any substantive content.
+            - Do NOT paraphrase or summarize — keep the speaker's own words and phrasing.
+            - Preserve technical terms, proper nouns, and numbers exactly as spoken.
+            - If the speaker switches languages, preserve their language choice per phrase.
+            - If a passage is unclear or ambiguous, keep it as-is rather than guessing.
+            - Return the original text unchanged if no cleanup is needed.
+            - Output only the cleaned text, nothing else.
             """
 
         let vocab = customVocabulary.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -47,14 +71,24 @@ actor TranscriptRefinementEngine {
         return prompt
     }
 
+    /// Format preceding utterances as read-only context for the LLM.
+    static func buildContextBlock(_ context: [Utterance]) -> String? {
+        guard !context.isEmpty else { return nil }
+        let lines = context.map { u in
+            let speaker = u.speaker == .you ? "Speaker A" : "Speaker B"
+            return "\(speaker): \(u.displayText)"
+        }
+        return "Previous context (do not modify):\n" + lines.joined(separator: "\n")
+    }
+
     init(settings: AppSettings, transcriptStore: TranscriptStore, client: any LLMCompleting = OpenRouterClient()) {
         self.settings = settings
         self.transcriptStore = transcriptStore
         self.client = client
     }
 
-    /// Queue an utterance for refinement.
-    func refine(_ utterance: Utterance) {
+    /// Queue an utterance for refinement, capturing preceding context.
+    func refine(_ utterance: Utterance, context: [Utterance] = []) {
         // Skip short utterances unless they look like a question
         let words = utterance.text.split(separator: " ")
         if words.count < minimumWordCount && !utterance.text.contains("?") {
@@ -64,7 +98,7 @@ actor TranscriptRefinementEngine {
             return
         }
 
-        pendingQueue.append(utterance)
+        pendingQueue.append((utterance: utterance, context: context))
         drainQueue()
     }
 
@@ -91,22 +125,23 @@ actor TranscriptRefinementEngine {
     // MARK: - Private
 
     private func drainQueue() {
-        while inFlightCount < maxConcurrent, let utterance = pendingQueue.first {
+        while inFlightCount < maxConcurrent, let item = pendingQueue.first {
             pendingQueue.removeFirst()
             inFlightCount += 1
 
             // Mark as pending on main actor
             let store = transcriptStore
+            let id = item.utterance.id
             Task { @MainActor in
-                store.updateRefinedText(id: utterance.id, refinedText: nil, status: .pending)
+                store.updateRefinedText(id: id, refinedText: nil, status: .pending)
             }
 
             let task = Task { [weak self] in
                 guard let self else { return }
-                await self.performRefinement(utterance)
-                await self.taskCompleted(id: utterance.id)
+                await self.performRefinement(item.utterance, context: item.context)
+                await self.taskCompleted(id: id)
             }
-            activeTasks[utterance.id] = task
+            activeTasks[id] = task
         }
     }
 
@@ -116,7 +151,7 @@ actor TranscriptRefinementEngine {
         drainQueue()
     }
 
-    private func performRefinement(_ utterance: Utterance) async {
+    private func performRefinement(_ utterance: Utterance, context: [Utterance]) async {
         let apiKey: String?
         let baseURL: URL?
         let model: String
@@ -129,7 +164,8 @@ actor TranscriptRefinementEngine {
         let mlxURL = await MainActor.run { settings.mlxBaseURL }
         let mlxModelName = await MainActor.run { settings.mlxModel }
         let customVocab = await MainActor.run { settings.transcriptionCustomVocabulary }
-        let systemPromptText = Self.buildSystemPrompt(customVocabulary: customVocab)
+        let languages = await MainActor.run { settings.refinementLanguages }
+        let systemPromptText = Self.buildSystemPrompt(languages: languages, customVocabulary: customVocab)
 
         switch provider {
         case .openRouter:
@@ -156,9 +192,15 @@ actor TranscriptRefinementEngine {
             model = mlxModelName
         }
 
+        var userContent = ""
+        if let contextBlock = Self.buildContextBlock(context) {
+            userContent += contextBlock + "\n\n"
+        }
+        userContent += "Clean this utterance:\n" + utterance.text
+
         let messages: [OpenRouterClient.Message] = [
             .init(role: "system", content: systemPromptText),
-            .init(role: "user", content: utterance.text)
+            .init(role: "user", content: userContent)
         ]
 
         do {

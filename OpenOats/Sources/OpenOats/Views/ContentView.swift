@@ -407,8 +407,13 @@ struct ContentView: View {
 
         // Trigger transcript refinement if enabled
         if settings.enableTranscriptRefinement, let engine = coordinator.refinementEngine {
+            // Capture preceding utterances as context (up to 3 before the current one)
+            let allUtterances = coordinator.transcriptStore.utterances
+            let contextStart = max(0, allUtterances.count - 4)
+            let contextEnd = max(0, allUtterances.count - 1)
+            let context = contextStart < contextEnd ? Array(allUtterances[contextStart..<contextEnd]) : []
             Task {
-                await engine.refine(last)
+                await engine.refine(last, context: context)
             }
         }
 
