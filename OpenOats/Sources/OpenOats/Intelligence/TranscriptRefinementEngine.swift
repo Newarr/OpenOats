@@ -179,6 +179,11 @@ actor TranscriptRefinementEngine {
 
     // MARK: - Private
 
+    private static func completionsURL(from baseURLString: String) -> URL? {
+        let base = baseURLString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return URL(string: base + "/v1/chat/completions")
+    }
+
     /// Centralized store update to avoid scattered MainActor hops.
     private func updateStore(id: UUID, refinedText: String?, status: RefinementStatus) async {
         let store = transcriptStore
@@ -194,14 +199,8 @@ actor TranscriptRefinementEngine {
 
             let id = item.utterance.id
 
-            // Mark as pending — awaited to ensure status lands before drain() returns.
-            let store = transcriptStore
-            let pendingTask = Task { @MainActor in
-                store.updateRefinedText(id: id, refinedText: nil, status: .pending)
-            }
-
             let task = Task {
-                await pendingTask.value
+                await self.updateStore(id: id, refinedText: nil, status: .pending)
                 await self.performRefinement(item.utterance, context: item.context)
                 await self.didCompleteTask(id: id)
             }
@@ -242,8 +241,7 @@ actor TranscriptRefinementEngine {
             model = refinementModel
         case .ollama:
             apiKey = nil
-            let base = config.ollamaURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            guard let url = URL(string: base + "/v1/chat/completions") else {
+            guard let url = Self.completionsURL(from: config.ollamaURL) else {
                 diagLog("[REFINE] invalid Ollama URL: \(config.ollamaURL)")
                 await updateStore(id: utterance.id, refinedText: nil, status: .failed)
                 return
@@ -252,8 +250,7 @@ actor TranscriptRefinementEngine {
             model = config.ollamaModel
         case .mlx:
             apiKey = nil
-            let base = config.mlxURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            guard let url = URL(string: base + "/v1/chat/completions") else {
+            guard let url = Self.completionsURL(from: config.mlxURL) else {
                 diagLog("[REFINE] invalid MLX URL: \(config.mlxURL)")
                 await updateStore(id: utterance.id, refinedText: nil, status: .failed)
                 return
