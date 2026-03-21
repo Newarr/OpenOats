@@ -10,12 +10,11 @@ actor TranscriptRefinementEngine {
     private let maxConcurrent = 3
     private var inFlightCount = 0
     private var pendingQueue: [(utterance: Utterance, context: [Utterance])] = []
-    private var activeTasks: [UUID: Task<Void, Never>] = []
+    private var activeTasks: [UUID: Task<Void, Never>] = [:]
 
     /// Hardcoded cheap model for refinement (keeps cost low).
     private let refinementModel = "openai/gpt-4o-mini"
     private let minimumWordCount = 5
-    private let contextWindowSize = 3
 
     static func buildSystemPrompt(languages: String, customVocabulary: String) -> String {
         let langList = languages
@@ -45,6 +44,8 @@ actor TranscriptRefinementEngine {
             Guidelines:
             - Remove speech disfluencies: filler words, false starts, and unnecessary repetitions.
             - Fix punctuation and capitalization.
+            - Keep verbal backchannels (e.g. "uh-huh", "yeah", "mm-hmm") when they serve as \
+            a direct response or acknowledgment.
             - Do NOT add, remove, or change any substantive content.
             - Do NOT paraphrase or summarize — keep the speaker's own words and phrasing.
             - Preserve technical terms, proper nouns, and numbers exactly as spoken.
@@ -81,6 +82,37 @@ actor TranscriptRefinementEngine {
         return "Previous context (do not modify):\n" + lines.joined(separator: "\n")
     }
 
+    /// Quick heuristic: does the text contain likely disfluencies worth cleaning?
+    static func needsCleanup(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        // Common disfluency markers across languages
+        let markers = [
+            // Filler sounds
+            " uh ", " um ", " ah ", " er ",
+            // English fillers
+            " like ", " you know ", " i mean ", " basically ", " actually ",
+            " literally ", " right ", " so ", " well ",
+            // Repetition patterns (word repeated)
+            "...", " -- ",
+            // Punctuation issues (run-on without punctuation)
+        ]
+        for marker in markers where lower.contains(marker) {
+            return true
+        }
+        // Check for text starting/ending with fillers
+        let prefixes = ["uh ", "um ", "ah ", "er ", "so ", "well ", "like "]
+        for prefix in prefixes where lower.hasPrefix(prefix) {
+            return true
+        }
+        // Check for missing sentence-final punctuation (likely needs cleanup)
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty && !trimmed.hasSuffix(".") && !trimmed.hasSuffix("!") &&
+           !trimmed.hasSuffix("?") && !trimmed.hasSuffix(",") && !trimmed.hasSuffix("\"") {
+            return true
+        }
+        return false
+    }
+
     init(settings: AppSettings, transcriptStore: TranscriptStore, client: any LLMCompleting = OpenRouterClient()) {
         self.settings = settings
         self.transcriptStore = transcriptStore
@@ -91,7 +123,18 @@ actor TranscriptRefinementEngine {
     func refine(_ utterance: Utterance, context: [Utterance] = []) {
         // Skip short utterances unless they look like a question
         let words = utterance.text.split(separator: " ")
-        if words.count < minimumWordCount && !utterance.text.contains("?") {
+        let isQuestion = utterance.text.contains("?")
+        if words.count < minimumWordCount && !isQuestion {
+            Task { @MainActor in
+                transcriptStore.updateRefinedText(id: utterance.id, refinedText: nil, status: .skipped)
+            }
+            return
+        }
+
+        // Detect-then-correct: skip utterances that look clean already.
+        // Always send questions through (even if they look clean, short questions
+        // passed the word-count gate specifically because they're questions).
+        if !isQuestion && !Self.needsCleanup(utterance.text) {
             Task { @MainActor in
                 transcriptStore.updateRefinedText(id: utterance.id, refinedText: nil, status: .skipped)
             }
@@ -156,40 +199,44 @@ actor TranscriptRefinementEngine {
         let baseURL: URL?
         let model: String
 
-        // Read settings on MainActor
-        let provider = await MainActor.run { settings.llmProvider }
-        let openRouterKey = await MainActor.run { settings.openRouterApiKey }
-        let ollamaURL = await MainActor.run { settings.ollamaBaseURL }
-        let ollamaModel = await MainActor.run { settings.ollamaLLMModel }
-        let mlxURL = await MainActor.run { settings.mlxBaseURL }
-        let mlxModelName = await MainActor.run { settings.mlxModel }
-        let customVocab = await MainActor.run { settings.transcriptionCustomVocabulary }
-        let languages = await MainActor.run { settings.refinementLanguages }
-        let systemPromptText = Self.buildSystemPrompt(languages: languages, customVocabulary: customVocab)
+        // Read all settings atomically in a single MainActor hop
+        let s = await MainActor.run {
+            (
+                provider: settings.llmProvider,
+                openRouterKey: settings.openRouterApiKey,
+                ollamaURL: settings.ollamaBaseURL,
+                ollamaModel: settings.ollamaLLMModel,
+                mlxURL: settings.mlxBaseURL,
+                mlxModelName: settings.mlxModel,
+                customVocab: settings.transcriptionCustomVocabulary,
+                languages: settings.refinementLanguages
+            )
+        }
+        let systemPromptText = Self.buildSystemPrompt(languages: s.languages, customVocabulary: s.customVocab)
 
-        switch provider {
+        switch s.provider {
         case .openRouter:
-            apiKey = openRouterKey.isEmpty ? nil : openRouterKey
+            apiKey = s.openRouterKey.isEmpty ? nil : s.openRouterKey
             baseURL = nil
             model = refinementModel
         case .ollama:
             apiKey = nil
-            let base = ollamaURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let base = s.ollamaURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
             guard let url = URL(string: base + "/v1/chat/completions") else {
                 await markFailed(utterance.id)
                 return
             }
             baseURL = url
-            model = ollamaModel
+            model = s.ollamaModel
         case .mlx:
             apiKey = nil
-            let base = mlxURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let base = s.mlxURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
             guard let url = URL(string: base + "/v1/chat/completions") else {
                 await markFailed(utterance.id)
                 return
             }
             baseURL = url
-            model = mlxModelName
+            model = s.mlxModelName
         }
 
         var userContent = ""
@@ -209,7 +256,8 @@ actor TranscriptRefinementEngine {
                 model: model,
                 messages: messages,
                 maxTokens: 512,
-                baseURL: baseURL
+                baseURL: baseURL,
+                temperature: 0
             )
 
             let trimmed = refined.trimmingCharacters(in: .whitespacesAndNewlines)

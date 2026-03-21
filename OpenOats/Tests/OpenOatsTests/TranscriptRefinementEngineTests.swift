@@ -10,6 +10,7 @@ private actor MockLLMClient: LLMCompleting {
     var lastModel: String?
     var lastApiKey: String?
     var lastBaseURL: URL?
+    var lastTemperature: Double?
     var shouldThrow = false
     var delay: Duration?
 
@@ -18,7 +19,8 @@ private actor MockLLMClient: LLMCompleting {
         model: String,
         messages: [OpenRouterClient.Message],
         maxTokens: Int,
-        baseURL: URL?
+        baseURL: URL?,
+        temperature: Double?
     ) async throws -> String {
         if let delay {
             try? await Task.sleep(for: delay)
@@ -27,6 +29,7 @@ private actor MockLLMClient: LLMCompleting {
         lastModel = model
         lastApiKey = apiKey
         lastBaseURL = baseURL
+        lastTemperature = temperature
         let index = callCount
         callCount += 1
         if shouldThrow {
@@ -107,6 +110,12 @@ final class TranscriptRefinementEngineTests: XCTestCase {
         XCTAssertTrue(prompt.contains("Return the original text unchanged if no cleanup is needed"))
     }
 
+    func testBuildSystemPromptBackchannelRule() async {
+        let prompt = TranscriptRefinementEngine.buildSystemPrompt(languages: "English", customVocabulary: "")
+        XCTAssertTrue(prompt.contains("uh-huh"))
+        XCTAssertTrue(prompt.contains("backchannels"))
+    }
+
     // MARK: - buildContextBlock
 
     func testBuildContextBlockEmpty() async {
@@ -125,6 +134,27 @@ final class TranscriptRefinementEngineTests: XCTestCase {
         XCTAssertTrue(result.contains("Speaker B: It's going well"))
     }
 
+    // MARK: - needsCleanup
+
+    func testNeedsCleanupDetectsFillerWords() {
+        XCTAssertTrue(TranscriptRefinementEngine.needsCleanup("Uh so we need to discuss this"))
+        XCTAssertTrue(TranscriptRefinementEngine.needsCleanup("I think like we should do it"))
+        XCTAssertTrue(TranscriptRefinementEngine.needsCleanup("Um let me think about that"))
+        XCTAssertTrue(TranscriptRefinementEngine.needsCleanup("You know what I mean right"))
+    }
+
+    func testNeedsCleanupDetectsMissingPunctuation() {
+        XCTAssertTrue(TranscriptRefinementEngine.needsCleanup("This sentence has no ending punctuation"))
+        XCTAssertFalse(TranscriptRefinementEngine.needsCleanup("This sentence is properly punctuated."))
+        XCTAssertFalse(TranscriptRefinementEngine.needsCleanup("Is this a question?"))
+        XCTAssertFalse(TranscriptRefinementEngine.needsCleanup("This is exciting!"))
+    }
+
+    func testNeedsCleanupReturnsFalseForCleanText() {
+        XCTAssertFalse(TranscriptRefinementEngine.needsCleanup("The quarterly results exceeded expectations."))
+        XCTAssertFalse(TranscriptRefinementEngine.needsCleanup("We should schedule a follow-up meeting."))
+    }
+
     // MARK: - Short Utterance Skipping
 
     @MainActor
@@ -139,7 +169,6 @@ final class TranscriptRefinementEngineTests: XCTestCase {
         store.append(short)
 
         await engine.refine(short)
-        // Give the MainActor task time to execute
         try await Task.sleep(for: .milliseconds(50))
 
         XCTAssertEqual(store.utterances.first?.refinementStatus, .skipped)
@@ -167,24 +196,66 @@ final class TranscriptRefinementEngineTests: XCTestCase {
         XCTAssertEqual(callCount, 1, "Questions should be refined even if short")
     }
 
+    // MARK: - Detect-then-correct Skipping
+
     @MainActor
-    func testExactlyFiveWordsIsNotSkipped() async throws {
+    func testCleanUtteranceIsSkipped() async throws {
         let settings = makeSettings()
         let store = TranscriptStore()
         let mockClient = MockLLMClient()
-        await mockClient.setResponses(["This has five words exactly."])
 
         let engine = TranscriptRefinementEngine(settings: settings, transcriptStore: store, client: mockClient)
 
-        let utterance = makeUtterance(text: "This has five words exactly")
-        store.append(utterance)
+        let clean = makeUtterance(text: "The quarterly results exceeded our expectations by a wide margin.")
+        store.append(clean)
 
-        await engine.refine(utterance)
+        await engine.refine(clean)
+        try await Task.sleep(for: .milliseconds(50))
+
+        XCTAssertEqual(store.utterances.first?.refinementStatus, .skipped)
+        let callCount = await mockClient.callCount
+        XCTAssertEqual(callCount, 0, "Clean text should not be sent to the LLM")
+    }
+
+    @MainActor
+    func testDirtyUtteranceIsNotSkipped() async throws {
+        let settings = makeSettings()
+        let store = TranscriptStore()
+        let mockClient = MockLLMClient()
+        await mockClient.setResponses(["We need to discuss the project timeline."])
+
+        let engine = TranscriptRefinementEngine(settings: settings, transcriptStore: store, client: mockClient)
+
+        let dirty = makeUtterance(text: "Uh so like we need to discuss the um project timeline")
+        store.append(dirty)
+
+        await engine.refine(dirty)
         await engine.drain(timeout: .seconds(2))
         try await Task.sleep(for: .milliseconds(50))
 
         let callCount = await mockClient.callCount
-        XCTAssertEqual(callCount, 1)
+        XCTAssertEqual(callCount, 1, "Dirty text should be sent to the LLM")
+    }
+
+    @MainActor
+    func testQuestionBypassesNeedsCleanupCheck() async throws {
+        let settings = makeSettings()
+        let store = TranscriptStore()
+        let mockClient = MockLLMClient()
+        await mockClient.setResponses(["What do you think about this approach?"])
+
+        let engine = TranscriptRefinementEngine(settings: settings, transcriptStore: store, client: mockClient)
+
+        // This looks clean but is a question — should still go through
+        let question = makeUtterance(text: "What do you think about this particular approach?")
+        store.append(question)
+
+        await engine.refine(question)
+        await engine.drain(timeout: .seconds(2))
+        try await Task.sleep(for: .milliseconds(50))
+
+        let callCount = await mockClient.callCount
+        XCTAssertEqual(callCount, 1, "Questions should bypass the needsCleanup check")
     }
 
     // MARK: - Successful Refinement
@@ -209,6 +280,27 @@ final class TranscriptRefinementEngineTests: XCTestCase {
         XCTAssertEqual(store.utterances.first?.refinementStatus, .completed)
     }
 
+    // MARK: - Temperature
+
+    @MainActor
+    func testRefinementUsesTemperatureZero() async throws {
+        let settings = makeSettings()
+        let store = TranscriptStore()
+        let mockClient = MockLLMClient()
+        await mockClient.setResponses(["Cleaned output from the model."])
+
+        let engine = TranscriptRefinementEngine(settings: settings, transcriptStore: store, client: mockClient)
+
+        let utterance = makeUtterance(text: "Uh so we need to um discuss this particular topic here")
+        store.append(utterance)
+
+        await engine.refine(utterance)
+        await engine.drain(timeout: .seconds(2))
+
+        let temperature = await mockClient.lastTemperature
+        XCTAssertEqual(temperature, 0, "Refinement should use temperature 0 for deterministic output")
+    }
+
     // MARK: - Failure Handling
 
     @MainActor
@@ -220,7 +312,7 @@ final class TranscriptRefinementEngineTests: XCTestCase {
 
         let engine = TranscriptRefinementEngine(settings: settings, transcriptStore: store, client: mockClient)
 
-        let utterance = makeUtterance(text: "This is a sentence that should fail during refinement")
+        let utterance = makeUtterance(text: "Um this is a sentence that should like fail during refinement")
         store.append(utterance)
 
         await engine.refine(utterance)
@@ -240,7 +332,7 @@ final class TranscriptRefinementEngineTests: XCTestCase {
 
         let engine = TranscriptRefinementEngine(settings: settings, transcriptStore: store, client: mockClient)
 
-        let utterance = makeUtterance(text: "This should fail because the LLM returns empty whitespace")
+        let utterance = makeUtterance(text: "Uh this should like fail because the LLM returns empty whitespace")
         store.append(utterance)
 
         await engine.refine(utterance)
@@ -263,7 +355,7 @@ final class TranscriptRefinementEngineTests: XCTestCase {
 
         let engine = TranscriptRefinementEngine(settings: settings, transcriptStore: store, client: mockClient)
 
-        let utterance = makeUtterance(text: "Some long enough text to pass the word count filter here")
+        let utterance = makeUtterance(text: "Uh some long enough text to like pass the word count filter here")
         store.append(utterance)
 
         await engine.refine(utterance)
@@ -289,7 +381,7 @@ final class TranscriptRefinementEngineTests: XCTestCase {
 
         let engine = TranscriptRefinementEngine(settings: settings, transcriptStore: store, client: mockClient)
 
-        let utterance = makeUtterance(text: "A sentence that is long enough to not be skipped by filter")
+        let utterance = makeUtterance(text: "Um a sentence that is like long enough to not be skipped")
         store.append(utterance)
 
         await engine.refine(utterance)
@@ -315,7 +407,7 @@ final class TranscriptRefinementEngineTests: XCTestCase {
 
         let engine = TranscriptRefinementEngine(settings: settings, transcriptStore: store, client: mockClient)
 
-        let utterance = makeUtterance(text: "A sentence that is long enough to not be skipped here")
+        let utterance = makeUtterance(text: "Er a sentence that is like long enough to not be skipped")
         store.append(utterance)
 
         await engine.refine(utterance)
@@ -334,25 +426,21 @@ final class TranscriptRefinementEngineTests: XCTestCase {
         let settings = makeSettings()
         let store = TranscriptStore()
         let mockClient = MockLLMClient()
-        // Slow responses to keep tasks in-flight
         await mockClient.setDelay(.milliseconds(200))
         await mockClient.setResponses((0..<6).map { "Refined utterance number \($0) from LLM" })
 
         let engine = TranscriptRefinementEngine(settings: settings, transcriptStore: store, client: mockClient)
 
-        // Queue 6 utterances
         for i in 0..<6 {
-            let u = makeUtterance(text: "This is utterance number \(i) with enough words to pass")
+            let u = makeUtterance(text: "Um this is like utterance number \(i) with enough words")
             store.append(u)
             await engine.refine(u)
         }
 
-        // After a short wait, at most 3 should have started
         try await Task.sleep(for: .milliseconds(50))
         let earlyCount = await mockClient.callCount
         XCTAssertLessThanOrEqual(earlyCount, 3, "At most 3 concurrent tasks should start")
 
-        // Wait for all to finish
         await engine.drain(timeout: .seconds(5))
         try await Task.sleep(for: .milliseconds(100))
 
@@ -370,7 +458,6 @@ final class TranscriptRefinementEngineTests: XCTestCase {
 
         let engine = TranscriptRefinementEngine(settings: settings, transcriptStore: store, client: mockClient)
 
-        // Should return immediately with no work
         await engine.drain(timeout: .seconds(1))
         // If we get here without hanging, the test passes
     }
@@ -439,7 +526,7 @@ final class TranscriptRefinementEngineTests: XCTestCase {
 
         let engine = TranscriptRefinementEngine(settings: settings, transcriptStore: store, client: mockClient)
 
-        let utterance = makeUtterance(text: "A sentence with enough words to not be filtered out")
+        let utterance = makeUtterance(text: "Um a sentence with like enough words to not be filtered")
         store.append(utterance)
 
         await engine.refine(utterance)
@@ -463,7 +550,7 @@ final class TranscriptRefinementEngineTests: XCTestCase {
 
         let engine = TranscriptRefinementEngine(settings: settings, transcriptStore: store, client: mockClient)
 
-        let utterance = makeUtterance(text: "Bueno entonces como que necesitamos discutir el proyecto")
+        let utterance = makeUtterance(text: "Uh bueno entonces como que necesitamos discutir el proyecto")
         store.append(utterance)
 
         await engine.refine(utterance)
@@ -487,7 +574,7 @@ final class TranscriptRefinementEngineTests: XCTestCase {
 
         let engine = TranscriptRefinementEngine(settings: settings, transcriptStore: store, client: mockClient)
 
-        let utterance = makeUtterance(text: "We were talking about open oats and the acme corp deal")
+        let utterance = makeUtterance(text: "So like we were talking about open oats and the acme corp deal")
         store.append(utterance)
 
         await engine.refine(utterance)
@@ -505,14 +592,13 @@ final class TranscriptRefinementEngineTests: XCTestCase {
     func testEmptyOpenRouterKeyPassesNilApiKey() async throws {
         let settings = makeSettings()
         settings.llmProvider = .openRouter
-        // Key defaults to "" from ephemeral secret store
         let store = TranscriptStore()
         let mockClient = MockLLMClient()
         await mockClient.setResponses(["Refined text output from the LLM model."])
 
         let engine = TranscriptRefinementEngine(settings: settings, transcriptStore: store, client: mockClient)
 
-        let utterance = makeUtterance(text: "A sentence with enough words to not be filtered out")
+        let utterance = makeUtterance(text: "Uh a sentence with like enough words to not be filtered out")
         store.append(utterance)
 
         await engine.refine(utterance)

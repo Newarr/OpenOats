@@ -7,7 +7,8 @@ protocol LLMCompleting: Sendable {
         model: String,
         messages: [OpenRouterClient.Message],
         maxTokens: Int,
-        baseURL: URL?
+        baseURL: URL?,
+        temperature: Double?
     ) async throws -> String
 }
 
@@ -25,6 +26,7 @@ actor OpenRouterClient: LLMCompleting {
         let messages: [Message]
         let stream: Bool
         let max_tokens: Int?
+        let temperature: Double?
     }
 
     /// Streams the completion response, yielding text chunks.
@@ -33,7 +35,8 @@ actor OpenRouterClient: LLMCompleting {
         model: String,
         messages: [Message],
         maxTokens: Int = 1024,
-        baseURL: URL? = nil
+        baseURL: URL? = nil,
+        temperature: Double? = nil
     ) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
@@ -42,7 +45,8 @@ actor OpenRouterClient: LLMCompleting {
                         model: model,
                         messages: messages,
                         stream: true,
-                        max_tokens: maxTokens
+                        max_tokens: maxTokens,
+                        temperature: temperature
                     )
 
                     let targetURL = baseURL ?? Self.defaultBaseURL
@@ -96,13 +100,15 @@ actor OpenRouterClient: LLMCompleting {
         model: String,
         messages: [Message],
         maxTokens: Int = 512,
-        baseURL: URL? = nil
+        baseURL: URL? = nil,
+        temperature: Double? = nil
     ) async throws -> String {
         let request = ChatRequest(
             model: model,
             messages: messages,
             stream: false,
-            max_tokens: maxTokens
+            max_tokens: maxTokens,
+            temperature: temperature
         )
 
         let targetURL = baseURL ?? Self.defaultBaseURL
