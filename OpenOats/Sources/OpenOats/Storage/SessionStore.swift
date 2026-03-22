@@ -1,7 +1,9 @@
 import Foundation
+import os
 
 /// Persists session transcripts as JSONL files with metadata sidecars.
 actor SessionStore {
+    private let log = Logger(subsystem: "com.openoats", category: "SessionStore")
     private let sessionsDirectory: URL
     private var currentFile: URL?
     private var fileHandle: FileHandle?
@@ -60,7 +62,7 @@ actor SessionStore {
             fileHandle.write(data)
             fileHandle.write("\n".data(using: .utf8)!)
         } catch {
-            print("SessionStore: failed to write record: \(error)")
+            log.error("Failed to write record: \(error.localizedDescription)")
         }
     }
 
@@ -237,7 +239,7 @@ actor SessionStore {
             try data.write(to: url, options: .atomic)
             try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
         } catch {
-            print("SessionStore: failed to write sidecar: \(error)")
+            log.error("Failed to write sidecar: \(error.localizedDescription)")
         }
     }
 
@@ -436,7 +438,7 @@ actor SessionStore {
             try payload.write(to: jsonl, options: .atomic)
             try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: jsonl.path)
         } catch {
-            print("SessionStore: failed to seed transcript: \(error)")
+            log.error("Failed to seed transcript: \(error.localizedDescription)")
         }
 
         writeSidecar(sidecar)

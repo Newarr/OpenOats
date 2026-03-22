@@ -1,9 +1,11 @@
 import Foundation
 import Observation
+import os
 
 @Observable
 @MainActor
 final class TemplateStore {
+    private let log = Logger(subsystem: "com.openoats", category: "TemplateStore")
     @ObservationIgnored nonisolated(unsafe) private var _templates: [MeetingTemplate] = []
     private(set) var templates: [MeetingTemplate] {
         get { access(keyPath: \.templates); return _templates }
@@ -238,7 +240,7 @@ final class TemplateStore {
                 }
             }
         } catch {
-            print("TemplateStore: failed to load, using defaults: \(error)")
+            log.error("Failed to load, using defaults: \(error.localizedDescription)")
             templates = Self.builtInTemplates
         }
         save()
@@ -251,7 +253,7 @@ final class TemplateStore {
             try data.write(to: storageURL, options: .atomic)
             try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: storageURL.path)
         } catch {
-            print("TemplateStore: failed to save: \(error)")
+            log.error("Failed to save: \(error.localizedDescription)")
         }
     }
 }
