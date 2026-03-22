@@ -6,6 +6,15 @@ import Observation
 @Observable
 @MainActor
 final class TranscriptCleanupEngine {
+    // SAFETY: nonisolated(unsafe) is required here because @Observable + @MainActor
+    // does not yet support actor-isolated stored properties in Swift's Observation framework.
+    // These backing vars are safe because:
+    //   1. The class is @MainActor, so all property access goes through MainActor-isolated
+    //      computed properties (the getters/setters below).
+    //   2. The only non-MainActor access is via `await self?.incrementCompleted()` inside
+    //      withTaskGroup, which hops to MainActor before touching these vars.
+    // INVARIANT: Never access _isCleaningUp / _chunksCompleted / _totalChunks / _error
+    // without going through MainActor isolation (i.e., always use `await` from non-MainActor contexts).
     @ObservationIgnored nonisolated(unsafe) private var _isCleaningUp = false
     private(set) var isCleaningUp: Bool {
         get { access(keyPath: \.isCleaningUp); return _isCleaningUp }
@@ -161,8 +170,9 @@ final class TranscriptCleanupEngine {
         return result
     }
 
-    func cancel() {
+    func cancel() async {
         currentTask?.cancel()
+        _ = await currentTask?.value  // drain the cancelled task before resetting state
         currentTask = nil
         isCleaningUp = false
         chunksCompleted = 0
@@ -181,7 +191,7 @@ final class TranscriptCleanupEngine {
     }
 
     /// Splits records into chunks of approximately 2.5 minutes based on timestamps.
-    private static func chunkRecords(_ records: [SessionRecord]) -> [[SessionRecord]] {
+    static func chunkRecords(_ records: [SessionRecord]) -> [[SessionRecord]] {
         guard let first = records.first else { return [] }
 
         let chunkDuration: TimeInterval = 150 // 2.5 minutes
@@ -251,7 +261,7 @@ final class TranscriptCleanupEngine {
 
     /// Parses the LLM response back into session records, stripping the
     /// `[HH:MM:SS] Speaker: ` prefix from each line.
-    private nonisolated static func parseResponse(
+    nonisolated static func parseResponse(
         _ response: String,
         originalRecords: [SessionRecord]
     ) -> [SessionRecord]? {

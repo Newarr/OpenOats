@@ -43,6 +43,10 @@ final class AppCoordinator {
     @ObservationIgnored private let _transcriptStore: TranscriptStore
     nonisolated var transcriptStore: TranscriptStore { _transcriptStore }
 
+    // SAFETY: nonisolated(unsafe) backing vars below are required for @Observable + @MainActor
+    // (Swift Observation does not yet support actor-isolated stored properties).
+    // All access goes through MainActor-isolated computed properties. Never read/write these
+    // backing vars from a non-MainActor context without `await`.
     @ObservationIgnored nonisolated(unsafe) private var _selectedTemplate: MeetingTemplate?
     var selectedTemplate: MeetingTemplate? {
         get { access(keyPath: \.selectedTemplate); return _selectedTemplate }
@@ -416,6 +420,7 @@ final class AppCoordinator {
         silenceCheckTask = nil
 
         Task {
+            await cleanupEngine.cancel()
             await meetingDetector?.stop()
         }
         meetingDetector = nil

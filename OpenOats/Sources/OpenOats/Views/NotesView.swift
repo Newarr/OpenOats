@@ -224,7 +224,7 @@ struct NotesView: View {
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                 Button("Cancel") {
-                    coordinator.cleanupEngine.cancel()
+                    Task { await coordinator.cleanupEngine.cancel() }
                 }
                 .buttonStyle(.bordered)
                 .font(.system(size: 11))
@@ -408,7 +408,7 @@ struct NotesView: View {
                 .foregroundStyle(.secondary)
             Spacer()
             Button("Cancel") {
-                coordinator.cleanupEngine.cancel()
+                Task { await coordinator.cleanupEngine.cancel() }
             }
             .buttonStyle(.bordered)
             .font(.system(size: 11))
@@ -550,9 +550,9 @@ struct NotesView: View {
         loadedNotes = nil
         loadedTranscript = []
         showingOriginal = false
-        coordinator.cleanupEngine.cancel()
 
         Task {
+            await coordinator.cleanupEngine.cancel()
             let notes = await coordinator.sessionStore.loadNotes(sessionID: sessionID)
             let transcript = await coordinator.sessionStore.loadTranscript(sessionID: sessionID)
 
@@ -651,6 +651,9 @@ struct NotesView: View {
                 records: loadedTranscript,
                 settings: settings
             )
+
+            // Check session hasn't changed before writing results to disk
+            guard selectedSessionID == sessionID else { return }
 
             let utterances = updated.map { record in
                 Utterance(

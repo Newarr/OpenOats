@@ -332,6 +332,11 @@ enum MarkdownMeetingWriter {
             return nil
         }
 
+        // Back up the original file before overwriting with LLM-generated content
+        let backupURL = fileURL.deletingPathExtension().appendingPathExtension("pre-llm.md")
+        try? FileManager.default.removeItem(at: backupURL) // remove stale backup if present
+        try? FileManager.default.copyItem(at: fileURL, to: backupURL)
+
         // Parse frontmatter and body
         let parts = content.components(separatedBy: "---")
         guard parts.count >= 3 else {
