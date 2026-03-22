@@ -44,13 +44,19 @@ final class TranscriptCleanupEngine {
 
     /// The system prompt instructing the LLM how to clean up transcripts.
     private nonisolated static let systemPrompt = """
-        You are a transcript cleanup assistant. Your job is to clean up raw speech-to-text output.
+        You are a transcript cleanup assistant. Your job is to clean up raw speech-to-text output. \
+        The transcript may be in any language or mix of languages (code-switching).
 
         Rules:
-        - Remove filler words (um, uh, like, you know, sort of, kind of, I mean, basically, actually, right, so, well) \
-        when they add no meaning.
+        - Remove filler words when they add no meaning. Examples by language:
+          English: um, uh, like, you know, sort of, kind of, I mean, basically, actually, right, so, well
+          Polish: no, wiesz, jakby, znaczy, w sumie, w sensie, tak, nie, kurde
+          Spanish: este, o sea, pues, bueno, eh, digamos, tipo
         - Fix punctuation and capitalization.
         - Preserve the original meaning exactly. Do not rephrase, summarize, or add content.
+        - Preserve the original language choice per phrase. If a speaker switches languages mid-sentence, keep that switch.
+        - If a word appears as a wrong-language hallucination (e.g., Portuguese text where Polish was spoken), \
+        correct it to the most likely intended word based on context.
         - Keep the exact same number of lines in the same order.
         - Each line starts with a timestamp and speaker prefix in the format: [HH:MM:SS] Speaker: text
         - Return the cleaned lines in the same format, one per line.
@@ -73,7 +79,7 @@ final class TranscriptCleanupEngine {
         case .openRouter:
             apiKey = settings.openRouterApiKey.isEmpty ? nil : settings.openRouterApiKey
             baseURL = nil
-            model = "openai/gpt-4o-mini"
+            model = settings.openRouterLLMModel
         case .ollama:
             apiKey = nil
             let base = settings.ollamaBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))

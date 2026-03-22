@@ -321,6 +321,17 @@ final class AppSettings {
         }
     }
 
+    @ObservationIgnored nonisolated(unsafe) private var _openRouterLLMModel: String
+    var openRouterLLMModel: String {
+        get { access(keyPath: \.openRouterLLMModel); return _openRouterLLMModel }
+        set {
+            withMutation(keyPath: \.openRouterLLMModel) {
+                _openRouterLLMModel = newValue
+                defaults.set(newValue, forKey: "openRouterLLMModel")
+            }
+        }
+    }
+
     @ObservationIgnored nonisolated(unsafe) private var _ollamaBaseURL: String
     var ollamaBaseURL: String {
         get { access(keyPath: \.ollamaBaseURL); return _ollamaBaseURL }
@@ -585,6 +596,7 @@ final class AppSettings {
         self._voyageApiKey = secretStore.load(key: "voyageApiKey") ?? ""
         self._llmProvider = LLMProvider(rawValue: defaults.string(forKey: "llmProvider") ?? "") ?? .openRouter
         self._embeddingProvider = EmbeddingProvider(rawValue: defaults.string(forKey: "embeddingProvider") ?? "") ?? .voyageAI
+        self._openRouterLLMModel = defaults.string(forKey: "openRouterLLMModel") ?? "openai/gpt-4o-mini"
         self._ollamaBaseURL = defaults.string(forKey: "ollamaBaseURL") ?? "http://localhost:11434"
         self._ollamaLLMModel = defaults.string(forKey: "ollamaLLMModel") ?? "qwen3:8b"
         self._ollamaEmbedModel = defaults.string(forKey: "ollamaEmbedModel") ?? "nomic-embed-text"

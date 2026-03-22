@@ -12,20 +12,20 @@ actor TranscriptRefinementEngine {
     private var pendingQueue: [Utterance] = []
     private var activeTasks: [UUID: Task<Void, Never>] = [:]
 
-    /// Hardcoded cheap model for refinement (keeps cost low).
-    private let refinementModel = "openai/gpt-4o-mini"
     private let minimumWordCount = 5
 
     private static func buildSystemPrompt(customVocabulary: String) -> String {
         var prompt = """
             Clean up this speech transcript. The speakers may code-switch between \
-            Polish and English (especially business/technical terminology). Rules:
-            - Remove filler words in both languages (uh, um, like, you know, no, \
-            wiesz, jakby, znaczy, w sumie, w sensie, tak, nie).
+            multiple languages. Rules:
+            - Remove filler words in any language. Examples:
+              English: uh, um, like, you know, basically, actually, right
+              Polish: no, wiesz, jakby, znaczy, w sumie, w sensie, tak, nie
+              Spanish: este, o sea, pues, bueno, eh, digamos
             - Fix punctuation and capitalization.
-            - If a word appears as a wrong-language hallucination (e.g., Portuguese, \
-            Russian, or Ukrainian text where Polish was spoken), correct it to the \
-            most likely Polish or English word based on context.
+            - If a word appears as a wrong-language hallucination (e.g., Portuguese \
+            or Russian text where another language was spoken), correct it to the \
+            most likely intended word based on context.
             - Preserve the original language choice per phrase.
             - Output only the cleaned text.
             """
@@ -123,6 +123,7 @@ actor TranscriptRefinementEngine {
         // Read settings on MainActor
         let provider = await MainActor.run { settings.llmProvider }
         let openRouterKey = await MainActor.run { settings.openRouterApiKey }
+        let openRouterModel = await MainActor.run { settings.openRouterLLMModel }
         let ollamaURL = await MainActor.run { settings.ollamaBaseURL }
         let ollamaModel = await MainActor.run { settings.ollamaLLMModel }
         let mlxURL = await MainActor.run { settings.mlxBaseURL }
@@ -134,7 +135,7 @@ actor TranscriptRefinementEngine {
         case .openRouter:
             apiKey = openRouterKey.isEmpty ? nil : openRouterKey
             baseURL = nil
-            model = refinementModel
+            model = openRouterModel
         case .ollama:
             apiKey = nil
             let base = ollamaURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
