@@ -153,7 +153,6 @@ final class StreamingTranscriber: @unchecked Sendable {
             let text = try await backend.transcribe(samples, locale: locale, previousContext: previousContext)
             guard !text.isEmpty else { return }
             log.info("[\(self.speaker.storageKey)] transcribed: \(text.prefix(80))")
-            diagLog("[\(speaker.storageKey)] transcribed chars=\(text.count)")
             // Store trailing words for cross-segment context
             let words = text.split(separator: " ")
             previousContext = words.suffix(Self.contextWordCount).joined(separator: " ")
@@ -206,15 +205,14 @@ final class StreamingTranscriber: @unchecked Sendable {
         }
 
         // Slow path: need to resample via AVAudioConverter
-        let stableInputBuffer = inputBuffer
-        let inputFormat = stableInputBuffer.format
+        let inputFormat = inputBuffer.format
         if converter == nil || converter?.inputFormat != inputFormat {
             converter = AVAudioConverter(from: inputFormat, to: targetFormat)
         }
         guard let converter else { return nil }
 
         let ratio = targetFormat.sampleRate / inputFormat.sampleRate
-        let outputFrames = AVAudioFrameCount(Double(stableInputBuffer.frameLength) * ratio)
+        let outputFrames = AVAudioFrameCount(Double(inputBuffer.frameLength) * ratio)
         guard outputFrames > 0 else { return nil }
 
         guard let outputBuffer = AVAudioPCMBuffer(
@@ -222,25 +220,16 @@ final class StreamingTranscriber: @unchecked Sendable {
             frameCapacity: outputFrames
         ) else { return nil }
 
-        final class ConversionState: @unchecked Sendable {
-            let inputBuffer: AVAudioPCMBuffer
-            var consumed = false
-
-            init(inputBuffer: AVAudioPCMBuffer) {
-                self.inputBuffer = inputBuffer
-            }
-        }
-
-        let conversionState = ConversionState(inputBuffer: stableInputBuffer)
         var error: NSError?
+        nonisolated(unsafe) var consumed = false
         converter.convert(to: outputBuffer, error: &error) { _, outStatus in
-            if conversionState.consumed {
+            if consumed {
                 outStatus.pointee = .noDataNow
                 return nil
             }
-            conversionState.consumed = true
+            consumed = true
             outStatus.pointee = .haveData
-            return conversionState.inputBuffer
+            return inputBuffer
         }
 
         if let error {
