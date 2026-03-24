@@ -64,8 +64,7 @@ final class NotesEngine {
             model = settings.selectedModel
         case .ollama:
             apiKey = nil
-            let base = settings.ollamaBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            guard let ollamaURL = URL(string: base + "/v1/chat/completions") else {
+            guard let ollamaURL = OpenRouterClient.chatCompletionsURL(from: settings.ollamaBaseURL) else {
                 error = "Invalid Ollama URL: \(settings.ollamaBaseURL)"
                 isGenerating = false
                 return
@@ -74,8 +73,7 @@ final class NotesEngine {
             model = settings.ollamaLLMModel
         case .mlx:
             apiKey = nil
-            let base = settings.mlxBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            guard let mlxURL = URL(string: base + "/v1/chat/completions") else {
+            guard let mlxURL = OpenRouterClient.chatCompletionsURL(from: settings.mlxBaseURL) else {
                 error = "Invalid MLX URL: \(settings.mlxBaseURL)"
                 isGenerating = false
                 return
@@ -84,8 +82,7 @@ final class NotesEngine {
             model = settings.mlxModel
         case .openAICompatible:
             apiKey = settings.openAILLMApiKey.isEmpty ? nil : settings.openAILLMApiKey
-            let base = settings.openAILLMBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            guard let openAIURL = URL(string: base + "/v1/chat/completions") else {
+            guard let openAIURL = OpenRouterClient.chatCompletionsURL(from: settings.openAILLMBaseURL) else {
                 error = "Invalid OpenAI Compatible URL: \(settings.openAILLMBaseURL)"
                 isGenerating = false
                 return

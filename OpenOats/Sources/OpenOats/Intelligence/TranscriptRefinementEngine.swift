@@ -112,8 +112,7 @@ actor TranscriptRefinementEngine {
             model = refinementModel
         case .ollama:
             apiKey = nil
-            let base = ollamaURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            guard let url = URL(string: base + "/v1/chat/completions") else {
+            guard let url = OpenRouterClient.chatCompletionsURL(from: ollamaURL) else {
                 await markFailed(utterance.id)
                 return
             }
@@ -121,8 +120,7 @@ actor TranscriptRefinementEngine {
             model = ollamaModel
         case .mlx:
             apiKey = nil
-            let base = mlxURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            guard let url = URL(string: base + "/v1/chat/completions") else {
+            guard let url = OpenRouterClient.chatCompletionsURL(from: mlxURL) else {
                 await markFailed(utterance.id)
                 return
             }
@@ -130,8 +128,7 @@ actor TranscriptRefinementEngine {
             model = mlxModelName
         case .openAICompatible:
             apiKey = openAILLMKey.isEmpty ? nil : openAILLMKey
-            let base = openAILLMURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            guard let url = URL(string: base + "/v1/chat/completions") else {
+            guard let url = OpenRouterClient.chatCompletionsURL(from: openAILLMURL) else {
                 await markFailed(utterance.id)
                 return
             }

@@ -77,22 +77,19 @@ final class SuggestionEngine {
         switch settings.llmProvider {
         case .openRouter: return nil
         case .ollama:
-            let base = settings.ollamaBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            guard let url = URL(string: base + "/v1/chat/completions") else {
+            guard let url = OpenRouterClient.chatCompletionsURL(from: settings.ollamaBaseURL) else {
                 print("[SuggestionEngine] Invalid Ollama URL: \(settings.ollamaBaseURL)")
                 return nil
             }
             return url
         case .mlx:
-            let base = settings.mlxBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            guard let url = URL(string: base + "/v1/chat/completions") else {
+            guard let url = OpenRouterClient.chatCompletionsURL(from: settings.mlxBaseURL) else {
                 print("[SuggestionEngine] Invalid MLX URL: \(settings.mlxBaseURL)")
                 return nil
             }
             return url
         case .openAICompatible:
-            let base = settings.openAILLMBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            guard let url = URL(string: base + "/v1/chat/completions") else {
+            guard let url = OpenRouterClient.chatCompletionsURL(from: settings.openAILLMBaseURL) else {
                 print("[SuggestionEngine] Invalid OpenAI Compatible URL: \(settings.openAILLMBaseURL)")
                 return nil
             }
