@@ -40,11 +40,15 @@ final class StreamingTranscriber: @unchecked Sendable {
 
     /// Silero VAD expects chunks of 4096 samples (256ms at 16kHz).
     private static let vadChunkSize = 4096
-    private static let minimumSpeechSamples = 8000
+    /// Parakeet TDT requires >= 1s of audio; shorter segments produce unreliable output.
+    private static let minimumSpeechSamples = 16_000
     private static let prerollChunkCount = 2
-    /// Flush speech for transcription every ~5 seconds (80,000 samples at 16kHz).
-    /// A longer flush window reduces the streaming WER penalty with minimal latency impact.
-    private static let flushInterval = 80_000
+    /// Flush speech for transcription every ~10 seconds (160,000 samples at 16kHz).
+    /// Longer flush windows give the conformer encoder more context per segment,
+    /// reducing WER significantly (benchmarked: 13.6% at 5s vs 8.8% at 10s on Polish).
+    /// VAD speechEnd events still trigger immediate flush on natural pauses,
+    /// so short utterances appear without the full 10s delay.
+    private static let flushInterval = 10 * 16_000
     /// Number of trailing words to carry across segment boundaries for decoder priming.
     private static let contextWordCount = 5
 
@@ -134,7 +138,7 @@ final class StreamingTranscriber: @unchecked Sendable {
                         }
                     } else if isSpeaking {
 
-                        // Flush every ~3s for near-real-time output during continuous speech
+                        // Flush on long continuous speech (see flushInterval)
                         if speechSamples.count >= Self.flushInterval {
                             let segment = speechSamples
                             speechSamples.removeAll(keepingCapacity: true)
