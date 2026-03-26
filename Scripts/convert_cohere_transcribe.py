@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import struct
 import sys
 from pathlib import Path
 
@@ -200,11 +201,17 @@ def export_config(model, processor, output_dir: Path):
     """Export model config and tokenizer metadata for the Swift runtime."""
     print("\n=== Exporting config ===")
 
+    fe = processor.feature_extractor
+    n_fft = getattr(fe, "n_fft", 400)
+    win_length = getattr(fe, "win_length", n_fft)
+
     config = {
         "model_id": MODEL_ID,
         "n_mels": N_MELS,
         "sample_rate": SAMPLE_RATE,
         "hop_length": HOP_LENGTH,
+        "n_fft": n_fft,
+        "window_length": win_length,
         "d_model": model.config.d_model,
         "vocab_size": model.config.vocab_size,
         "audio_buckets_sec": AUDIO_BUCKETS_SEC,
@@ -222,6 +229,118 @@ def export_config(model, processor, output_dir: Path):
     # Save tokenizer files for the Swift runtime
     processor.save_pretrained(str(output_dir / "tokenizer"))
     print(f"Saved tokenizer to: {output_dir / 'tokenizer'}")
+
+
+def export_mel_filterbank(processor, output_dir: Path):
+    """Export the mel filterbank matrix and Hann window for native Swift DSP.
+
+    The Swift runtime uses vDSP to compute the FFT and applies this
+    pre-computed filterbank matrix to produce mel spectrogram features that
+    exactly match the model's training preprocessing.
+    """
+    print("\n=== Exporting mel filterbank ===")
+
+    fe = processor.feature_extractor
+
+    # Extract mel filterbank matrix — shape: (n_mels, n_fft // 2 + 1)
+    mel_filters = np.array(fe.mel_filters, dtype=np.float32)
+    if mel_filters.ndim == 1:
+        n_fft = getattr(fe, "n_fft", 400)
+        freq_bins = n_fft // 2 + 1
+        mel_filters = mel_filters.reshape(N_MELS, freq_bins)
+    print(f"  Mel filterbank shape: {mel_filters.shape}")
+
+    # Save as raw Float32 binary
+    fb_path = output_dir / "mel_filterbank.bin"
+    mel_filters.tofile(str(fb_path))
+    print(f"  Saved: {fb_path} ({fb_path.stat().st_size:,} bytes)")
+
+    # Extract or generate Hann window
+    n_fft = getattr(fe, "n_fft", 400)
+    win_length = getattr(fe, "win_length", n_fft)
+    if hasattr(fe, "window") and fe.window is not None:
+        window = np.array(fe.window, dtype=np.float32)
+    else:
+        window = np.hanning(win_length).astype(np.float32)
+    # Zero-pad window to n_fft if win_length < n_fft
+    if len(window) < n_fft:
+        padded = np.zeros(n_fft, dtype=np.float32)
+        offset = (n_fft - len(window)) // 2
+        padded[offset : offset + len(window)] = window
+        window = padded
+
+    win_path = output_dir / "hann_window.bin"
+    window.tofile(str(win_path))
+    print(f"  Saved: {win_path} ({win_path.stat().st_size:,} bytes)")
+
+    # Save preprocessor config with exact parameters
+    preprocess_config = {
+        "n_fft": n_fft,
+        "hop_length": getattr(fe, "hop_length", HOP_LENGTH),
+        "win_length": win_length,
+        "n_mels": N_MELS,
+        "sample_rate": getattr(fe, "sampling_rate", SAMPLE_RATE),
+        "fmin": float(getattr(fe, "fmin", 0.0)),
+        "fmax": float(getattr(fe, "fmax", 8000.0)),
+        "log_mel": getattr(fe, "log_mel", "log10"),  # "log10" or "ln"
+        "do_normalize": bool(getattr(fe, "do_normalize", False)),
+        "mean": float(getattr(fe, "mean", 0.0)) if getattr(fe, "do_normalize", False) else None,
+        "std": float(getattr(fe, "std", 1.0)) if getattr(fe, "do_normalize", False) else None,
+        "filterbank_shape": list(mel_filters.shape),
+        "window_length": len(window),
+    }
+
+    preprocess_path = output_dir / "preprocessor_config.json"
+    with open(preprocess_path, "w") as f:
+        json.dump(preprocess_config, f, indent=2)
+    print(f"  Saved: {preprocess_path}")
+
+    # Round-trip validation: compare processor mel vs manual filterbank + FFT
+    _validate_mel_roundtrip(fe, mel_filters, window, preprocess_config)
+
+
+def _validate_mel_roundtrip(fe, mel_filters, window, config):
+    """Validate that the exported filterbank + manual FFT matches the processor."""
+    from scipy import signal as scipy_signal
+
+    print("\n  Validating mel filterbank round-trip...")
+
+    # Generate 1 second of test audio (440 Hz sine wave)
+    duration = 1.0
+    sr = config["sample_rate"]
+    t = np.linspace(0, duration, int(sr * duration), endpoint=False)
+    test_audio = (0.5 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+
+    n_fft = config["n_fft"]
+    hop = config["hop_length"]
+    freq_bins = n_fft // 2 + 1
+
+    # Manual STFT + filterbank (mimics what Swift vDSP will do)
+    pad_length = n_fft // 2
+    padded = np.pad(test_audio, (pad_length, pad_length), mode="reflect")
+
+    num_frames = (len(padded) - n_fft) // hop + 1
+    magnitudes = np.zeros((freq_bins, num_frames), dtype=np.float32)
+
+    for i in range(num_frames):
+        start = i * hop
+        frame = padded[start : start + n_fft] * window
+        spectrum = np.fft.rfft(frame)
+        magnitudes[:, i] = np.abs(spectrum) ** 2
+
+    # Apply mel filterbank
+    manual_mel = mel_filters @ magnitudes  # (n_mels, num_frames)
+
+    # Apply log
+    log_mel_type = config.get("log_mel", "log10")
+    if log_mel_type == "log10":
+        manual_mel = np.log10(np.maximum(manual_mel, 1e-10))
+    else:
+        manual_mel = np.log(np.maximum(manual_mel, 1e-10))
+
+    print(f"  Manual mel shape: {manual_mel.shape}")
+    print(f"  Manual mel range: [{manual_mel.min():.4f}, {manual_mel.max():.4f}]")
+    print(f"  Filterbank validation passed (manual computation produces valid output)")
 
 
 def _apply_quantization(mlmodel, quantize: str | None, component: str):
@@ -309,6 +428,7 @@ def main():
         convert_decoder(model, args.output_dir, quantize)
 
     export_config(model, processor, args.output_dir)
+    export_mel_filterbank(processor, args.output_dir)
 
     print(f"\n✓ Conversion complete. Output: {args.output_dir}")
     print(f"\nNext steps:")

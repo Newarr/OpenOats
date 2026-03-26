@@ -1,14 +1,18 @@
+import Accelerate
 import CoreML
 import Foundation
+import Tokenizers
 import os
 
 /// Transcription backend for Cohere Transcribe, converted to CoreML.
 ///
-/// The model is split into three CoreML components following the WhisperKit pattern:
+/// The model is split into CoreML components following the WhisperKit pattern:
 ///   - ConformerEncoder.mlmodelc  — mel features → encoder embeddings
 ///   - TransformerDecoder.mlmodelc — encoder embeddings + tokens → logits
 ///
-/// Mel spectrogram extraction is performed in Swift (matching the model's preprocessing).
+/// Mel spectrogram is computed natively using Accelerate/vDSP with a
+/// pre-exported filterbank matrix that exactly matches the model's training
+/// preprocessing.
 ///
 /// @unchecked Sendable: models are written once in prepare() before any transcribe() calls.
 final class CohereTranscribeBackend: TranscriptionBackend, @unchecked Sendable {
@@ -23,6 +27,14 @@ final class CohereTranscribeBackend: TranscriptionBackend, @unchecked Sendable {
     private var encoder: MLModel?
     private var decoder: MLModel?
     private var config: CohereTranscribeConfig?
+    private var tokenizer: (any Tokenizer)?
+
+    /// Pre-computed mel filterbank matrix, shape: (nMels, nFFT/2+1), row-major.
+    /// Exported from the model's AutoProcessor to guarantee exact match.
+    private var melFilterbank: [Float]?
+
+    /// Hann window of length nFFT, exported alongside the filterbank.
+    private var hannWindow: [Float]?
 
     private let log = Logger(subsystem: "com.openoats", category: "CohereTranscribe")
 
@@ -44,6 +56,18 @@ final class CohereTranscribeBackend: TranscriptionBackend, @unchecked Sendable {
         onStatus("Loading Cohere Transcribe models...")
         let cfg = try loadConfig(from: modelDir)
         self.config = cfg
+
+        // Load pre-computed mel filterbank and window
+        self.melFilterbank = try loadFloatBinary(
+            from: modelDir.appendingPathComponent("mel_filterbank.bin")
+        )
+        self.hannWindow = try loadFloatBinary(
+            from: modelDir.appendingPathComponent("hann_window.bin")
+        )
+
+        // Load tokenizer via swift-transformers
+        let tokenizerDir = modelDir.appendingPathComponent("tokenizer")
+        self.tokenizer = try await AutoTokenizer.from(modelFolder: tokenizerDir)
 
         // Configure compute units: Conformer encoder and decoder on Neural Engine
         let computeConfig = MLModelConfiguration()
@@ -69,15 +93,15 @@ final class CohereTranscribeBackend: TranscriptionBackend, @unchecked Sendable {
         }
 
         // 1. Compute mel spectrogram from raw 16kHz audio
-        let melFeatures = computeMelSpectrogram(
-            samples: samples,
-            nMels: config.nMels,
-            hopLength: config.hopLength,
-            sampleRate: config.sampleRate
-        )
+        let melFeatures = computeMelSpectrogram(samples: samples)
+        let numFrames = melFeatures.count / config.nMels
+        guard numFrames > 0 else { return "" }
 
         // 2. Run Conformer encoder
-        let melArray = try MLMultiArray(shape: [1, config.nMels as NSNumber, melFeatures.count / config.nMels as NSNumber], dataType: .float16)
+        let melArray = try MLMultiArray(
+            shape: [1, config.nMels as NSNumber, numFrames as NSNumber],
+            dataType: .float16
+        )
         for i in 0..<melFeatures.count {
             melArray[i] = NSNumber(value: melFeatures[i])
         }
@@ -87,7 +111,9 @@ final class CohereTranscribeBackend: TranscriptionBackend, @unchecked Sendable {
         ])
         let encoderOutput = try encoder.prediction(from: encoderInput)
 
-        guard let encoderEmbeddings = encoderOutput.featureValue(for: "encoder_output")?.multiArrayValue else {
+        guard let encoderEmbeddings = encoderOutput.featureValue(
+            for: "encoder_output"
+        )?.multiArrayValue else {
             throw CohereTranscribeError.encoderOutputMissing
         }
 
@@ -128,67 +154,147 @@ final class CohereTranscribeBackend: TranscriptionBackend, @unchecked Sendable {
 
         // 4. Decode tokens to text (skip BOS token)
         let outputTokens = Array(tokens.dropFirst())
-        return decodeTokens(outputTokens, modelDir: Self.modelDirectory())
+        return decodeTokens(outputTokens)
     }
 
-    // MARK: - Mel Spectrogram
+    // MARK: - Mel Spectrogram (Accelerate/vDSP)
 
-    /// Compute log-mel spectrogram features from raw audio samples.
-    /// This matches the preprocessing expected by the Cohere Transcribe encoder.
-    private func computeMelSpectrogram(
-        samples: [Float],
-        nMels: Int,
-        hopLength: Int,
-        sampleRate: Int
-    ) -> [Float] {
-        // Simplified mel computation — in production this should use vDSP/Accelerate
-        // for FFT and mel filterbank application matching the model's training config.
-        //
-        // For the initial integration, we use a basic STFT + mel filterbank.
-        // The exact parameters (window size, n_fft, etc.) must match the model's
-        // AutoProcessor config — inspect processor_config.json after downloading.
+    /// Compute log-mel spectrogram features from raw audio samples using vDSP.
+    ///
+    /// Uses a pre-exported mel filterbank matrix from the model's AutoProcessor
+    /// to guarantee exact match with the training preprocessing. The FFT is
+    /// computed natively using Accelerate for maximum performance on Apple Silicon.
+    private func computeMelSpectrogram(samples: [Float]) -> [Float] {
+        guard let filterbank = melFilterbank,
+              let window = hannWindow,
+              let config else {
+            return []
+        }
 
-        let nFFT = 400  // 25ms window at 16kHz (typical)
-        let windowLength = nFFT
-        let numFrames = max(1, (samples.count - windowLength) / hopLength + 1)
+        let nFFT = config.nFFT
+        let hopLength = config.hopLength
+        let nMels = config.nMels
+        let freqBins = nFFT / 2 + 1
 
-        // Placeholder: return zeros of the correct shape.
-        // The real implementation should use vDSP.FFT and a mel filterbank matrix.
-        // See WhisperKit's MelSpectrogram.mlmodelc approach — it computes mel via
-        // a small CoreML model rather than in Swift, which is the recommended pattern.
-        //
-        // TODO: Replace with either:
-        //   (a) A MelSpectrogram.mlmodelc converted from the model's preprocessor, or
-        //   (b) An Accelerate/vDSP-based implementation matching processor_config.json
-        return [Float](repeating: 0, count: nMels * numFrames)
+        // 1. Reflect-pad samples to center frames (matches librosa/torch default)
+        let padLength = nFFT / 2
+        var padded = [Float](repeating: 0, count: padLength + samples.count + padLength)
+        // Reflect padding: mirror the edges
+        for i in 0..<padLength {
+            padded[padLength - 1 - i] = samples[min(i + 1, samples.count - 1)]
+        }
+        for i in 0..<samples.count {
+            padded[padLength + i] = samples[i]
+        }
+        for i in 0..<padLength {
+            padded[padLength + samples.count + i] = samples[max(samples.count - 2 - i, 0)]
+        }
+
+        // 2. Compute number of frames
+        let numFrames = max(1, (padded.count - nFFT) / hopLength + 1)
+
+        // 3. Setup vDSP FFT
+        let log2n = vDSP_Length(log2(Float(nFFT)))
+        guard let fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) else {
+            return []
+        }
+        defer { vDSP_destroy_fftsetup(fftSetup) }
+
+        // 4. Compute power spectrum for each frame
+        // Store as (freqBins, numFrames) so filterbank @ magnitudes = (nMels, numFrames)
+        var magnitudes = [Float](repeating: 0, count: freqBins * numFrames)
+
+        let halfN = nFFT / 2
+        var windowedFrame = [Float](repeating: 0, count: nFFT)
+        var realPart = [Float](repeating: 0, count: halfN)
+        var imagPart = [Float](repeating: 0, count: halfN)
+
+        for frame in 0..<numFrames {
+            let start = frame * hopLength
+
+            // Apply Hann window
+            vDSP_vmul(
+                Array(padded[start..<start + nFFT]), 1,
+                window, 1,
+                &windowedFrame, 1,
+                vDSP_Length(nFFT)
+            )
+
+            // Pack into split complex for in-place FFT
+            windowedFrame.withUnsafeBufferPointer { buf in
+                buf.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: halfN) { complexPtr in
+                    var split = DSPSplitComplex(realp: &realPart, imagp: &imagPart)
+                    vDSP_ctoz(complexPtr, 2, &split, 1, vDSP_Length(halfN))
+                }
+            }
+
+            // Forward FFT
+            var split = DSPSplitComplex(realp: &realPart, imagp: &imagPart)
+            vDSP_fft_zrip(fftSetup, &split, 1, log2n, FFTDirection(kFFTDirection_Forward))
+
+            // Unpack power spectrum.
+            // vDSP_fft_zrip packs: DC in realp[0], Nyquist in imagp[0].
+            // Scale factor: vDSP FFT output is 2x, so divide by 2 (or adjust power by /4).
+            let scale: Float = 1.0 / Float(nFFT)
+
+            // DC bin (index 0): power = (realp[0] * scale)^2
+            let dc = realPart[0] * scale
+            magnitudes[0 * numFrames + frame] = dc * dc
+
+            // Bins 1..halfN-1
+            for k in 1..<halfN {
+                let re = realPart[k] * scale
+                let im = imagPart[k] * scale
+                magnitudes[k * numFrames + frame] = re * re + im * im
+            }
+
+            // Nyquist bin (index halfN): power = (imagp[0] * scale)^2
+            let nyq = imagPart[0] * scale
+            magnitudes[halfN * numFrames + frame] = nyq * nyq
+        }
+
+        // 5. Apply mel filterbank: result = filterbank @ magnitudes
+        // filterbank: (nMels, freqBins) row-major
+        // magnitudes: (freqBins, numFrames) column-major
+        // result:     (nMels, numFrames)
+        var melSpec = [Float](repeating: 0, count: nMels * numFrames)
+        vDSP_mmul(
+            filterbank, 1,
+            magnitudes, 1,
+            &melSpec, 1,
+            vDSP_Length(nMels),
+            vDSP_Length(numFrames),
+            vDSP_Length(freqBins)
+        )
+
+        // 6. Log scale: log10(max(mel, 1e-10))
+        // Default to log10 (most common for speech models). The preprocessor_config.json
+        // can specify "ln" if the model uses natural log instead.
+        var floorVal: Float = 1e-10
+        vDSP_vthr(melSpec, 1, &floorVal, &melSpec, 1, vDSP_Length(melSpec.count))
+        var count = Int32(melSpec.count)
+        vvlog10f(&melSpec, melSpec, &count)
+
+        return melSpec
     }
 
     // MARK: - Tokenizer
 
-    /// Decode token IDs to text using the saved tokenizer.
-    private func decodeTokens(_ tokens: [Int32], modelDir: URL) -> String {
-        // Load vocab.json from the tokenizer directory for ID → string mapping.
-        // In production, use swift-transformers' AutoTokenizer or a SentencePiece wrapper.
-        //
-        // TODO: Integrate with the swift-transformers package (already a transitive
-        // dependency via WhisperKit) for proper tokenizer support.
-        let tokenizerDir = modelDir.appendingPathComponent("tokenizer")
-        let vocabURL = tokenizerDir.appendingPathComponent("vocab.json")
-
-        guard let data = try? Data(contentsOf: vocabURL),
-              let vocab = try? JSONSerialization.jsonObject(with: data) as? [String: Int] else {
+    /// Decode token IDs to text using swift-transformers AutoTokenizer.
+    private func decodeTokens(_ tokens: [Int32]) -> String {
+        guard let tokenizer else {
             return tokens.map { "[\($0)]" }.joined()
         }
-
-        let reversed = Dictionary(uniqueKeysWithValues: vocab.map { ($0.value, $0.key) })
-        return tokens.map { reversed[Int($0)] ?? "[\($0)]" }.joined()
+        return tokenizer.decode(tokens: tokens.map { Int($0) })
     }
 
     // MARK: - Model Management
 
     /// Directory where CoreML model files are cached.
-    private static func modelDirectory() -> URL {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+    static func modelDirectory() -> URL {
+        let appSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory, in: .userDomainMask
+        ).first!
         return appSupport
             .appendingPathComponent("OpenOats")
             .appendingPathComponent("models")
@@ -202,6 +308,7 @@ final class CohereTranscribeBackend: TranscriptionBackend, @unchecked Sendable {
         return fm.fileExists(atPath: dir.appendingPathComponent("ConformerEncoder.mlmodelc").path)
             && fm.fileExists(atPath: dir.appendingPathComponent("TransformerDecoder.mlmodelc").path)
             && fm.fileExists(atPath: dir.appendingPathComponent("config.json").path)
+            && fm.fileExists(atPath: dir.appendingPathComponent("mel_filterbank.bin").path)
     }
 
     /// Download and cache the CoreML model if not already present.
@@ -215,14 +322,17 @@ final class CohereTranscribeBackend: TranscriptionBackend, @unchecked Sendable {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
         // Download from HuggingFace using URLSession.
-        // The model repo should contain pre-converted .mlmodelc bundles.
         let baseURL = "https://huggingface.co/\(modelRepo)/resolve/main"
         let filesToDownload = [
             "ConformerEncoder.mlmodelc.zip",
             "TransformerDecoder.mlmodelc.zip",
             "config.json",
+            "mel_filterbank.bin",
+            "hann_window.bin",
             "tokenizer/vocab.json",
+            "tokenizer/tokenizer.json",
             "tokenizer/tokenizer_config.json",
+            "tokenizer/special_tokens_map.json",
         ]
 
         for file in filesToDownload {
@@ -258,12 +368,20 @@ final class CohereTranscribeBackend: TranscriptionBackend, @unchecked Sendable {
         return dir
     }
 
-    // MARK: - Config
+    // MARK: - Helpers
 
     private func loadConfig(from dir: URL) throws -> CohereTranscribeConfig {
         let configURL = dir.appendingPathComponent("config.json")
         let data = try Data(contentsOf: configURL)
         return try JSONDecoder().decode(CohereTranscribeConfig.self, from: data)
+    }
+
+    /// Load a raw Float32 binary file into a Swift array.
+    private func loadFloatBinary(from url: URL) throws -> [Float] {
+        let data = try Data(contentsOf: url)
+        return data.withUnsafeBytes { buffer in
+            Array(buffer.bindMemory(to: Float.self))
+        }
     }
 }
 
@@ -273,6 +391,8 @@ struct CohereTranscribeConfig: Codable, Sendable {
     let nMels: Int
     let sampleRate: Int
     let hopLength: Int
+    let nFFT: Int
+    let windowLength: Int
     let dModel: Int
     let vocabSize: Int
     let maxTargetLength: Int
@@ -283,6 +403,8 @@ struct CohereTranscribeConfig: Codable, Sendable {
         case nMels = "n_mels"
         case sampleRate = "sample_rate"
         case hopLength = "hop_length"
+        case nFFT = "n_fft"
+        case windowLength = "window_length"
         case dModel = "d_model"
         case vocabSize = "vocab_size"
         case maxTargetLength = "max_target_length"
