@@ -165,7 +165,11 @@ final class AppRuntime {
                 settings: settings,
                 transcriptStore: coordinator.transcriptStore
             ),
-            audioRecorder: AudioRecorder(outputDirectory: notesDirectory)
+            audioRecorder: {
+                let recorder = AudioRecorder(outputDirectory: notesDirectory)
+                recorder.savePerChannelAudio = settings.enableBatchRefinement
+                return recorder
+            }()
         )
     }
 

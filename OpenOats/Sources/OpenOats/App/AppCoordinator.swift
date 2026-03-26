@@ -89,6 +89,9 @@ final class AppCoordinator {
     var refinementEngine: TranscriptRefinementEngine?
     var audioRecorder: AudioRecorder?
 
+    /// Batch re-transcription engine for post-meeting accuracy refinement.
+    private var batchTranscriptionTask: Task<Void, Never>?
+
     /// The template snapshot frozen at session start (not stop).
     private var sessionTemplateSnapshot: TemplateSnapshot?
 
@@ -312,6 +315,80 @@ final class AppCoordinator {
         silenceCheckTask?.cancel()
         silenceCheckTask = nil
         lastUtteranceAt = nil
+
+        // 9. Kick off async batch re-transcription if enabled
+        if let settings, settings.enableBatchRefinement, settings.saveAudioRecording {
+            let audioFmt = DateFormatter()
+            audioFmt.dateFormat = "yyyy-MM-dd_HH-mm"
+            let audioURL = URL(fileURLWithPath: settings.notesFolderPath)
+                .appendingPathComponent("\(audioFmt.string(from: index.startedAt)).m4a")
+            let capturedSessionID = sessionID
+            let capturedLocale = Locale(identifier: settings.transcriptionLocale)
+            let capturedOutputDir = URL(fileURLWithPath: settings.notesFolderPath)
+            let capturedIndex = index
+            let store = sessionStore
+
+            batchTranscriptionTask = Task.detached(priority: .utility) { [weak self] in
+                do {
+                    let engine = BatchTranscriptionEngine()
+                    try await engine.prepare { status in
+                        diagLog("[BATCH] \(status)")
+                    }
+                    let segments = try await engine.transcribe(
+                        audioURL: audioURL,
+                        locale: capturedLocale
+                    )
+
+                    // Backfill refined text from batch segments into the session JSONL
+                    let records = await store.loadTranscript(sessionID: capturedSessionID)
+                    if !records.isEmpty && !segments.isEmpty {
+                        let refined = Self.alignBatchSegments(
+                            segments: segments,
+                            originalRecords: records,
+                            sessionStart: capturedIndex.startedAt
+                        )
+                        await store.backfillBatchRefinedText(
+                            sessionID: capturedSessionID,
+                            refinedRecords: refined
+                        )
+
+                        // Regenerate Markdown with batch-refined text
+                        let updatedRecords = await store.loadTranscript(sessionID: capturedSessionID)
+                        MarkdownMeetingWriter.write(
+                            metadata: .init(from: capturedIndex),
+                            records: updatedRecords,
+                            outputDirectory: capturedOutputDir
+                        )
+                        diagLog("[BATCH] Session \(capturedSessionID) batch refinement complete")
+                    }
+                } catch {
+                    diagLog("[BATCH] Batch transcription failed: \(error)")
+                }
+            }
+        }
+    }
+
+    /// Align batch transcription segments with original utterances by timestamp,
+    /// preserving the original speaker labels while using batch text for accuracy.
+    private static func alignBatchSegments(
+        segments: [BatchSegment],
+        originalRecords: [SessionRecord],
+        sessionStart: Date
+    ) -> [(index: Int, refinedText: String)] {
+        var results: [(index: Int, refinedText: String)] = []
+
+        for (recordIndex, record) in originalRecords.enumerated() {
+            let recordOffset = record.timestamp.timeIntervalSince(sessionStart)
+
+            // Find the batch segment whose time range overlaps this utterance
+            if let match = segments.first(where: {
+                recordOffset >= $0.startTime - 1.0 && recordOffset < $0.endTime + 1.0
+            }) {
+                results.append((index: recordIndex, refinedText: match.text))
+            }
+        }
+
+        return results
     }
 
     // MARK: - History

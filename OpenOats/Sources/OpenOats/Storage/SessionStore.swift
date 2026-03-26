@@ -210,6 +210,65 @@ actor SessionStore {
         return anyUpdated
     }
 
+    /// Backfill refined text from batch re-transcription into a past session's JSONL.
+    /// Uses index-based alignment: each entry in `refinedRecords` specifies which
+    /// record index to update and the new refined text.
+    func backfillBatchRefinedText(
+        sessionID: String,
+        refinedRecords: [(index: Int, refinedText: String)]
+    ) {
+        let file = jsonlURL(for: sessionID)
+        guard let content = try? String(contentsOf: file, encoding: .utf8) else { return }
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+
+        let lines = content.components(separatedBy: "\n").filter { !$0.isEmpty }
+        guard !lines.isEmpty else { return }
+
+        // Build lookup from record index → refined text
+        let lookup = Dictionary(uniqueKeysWithValues: refinedRecords.map { ($0.index, $0.refinedText) })
+        guard !lookup.isEmpty else { return }
+
+        var updatedLines: [String] = []
+        var anyUpdated = false
+
+        for (i, line) in lines.enumerated() {
+            guard let data = line.data(using: .utf8),
+                  var record = try? decoder.decode(SessionRecord.self, from: data) else {
+                updatedLines.append(line)
+                continue
+            }
+
+            if let refined = lookup[i] {
+                record = SessionRecord(
+                    speaker: record.speaker,
+                    text: record.text,
+                    timestamp: record.timestamp,
+                    suggestions: record.suggestions,
+                    kbHits: record.kbHits,
+                    suggestionDecision: record.suggestionDecision,
+                    surfacedSuggestionText: record.surfacedSuggestionText,
+                    conversationStateSummary: record.conversationStateSummary,
+                    refinedText: refined
+                )
+                anyUpdated = true
+            }
+
+            if let encoded = try? encoder.encode(record),
+               let jsonString = String(data: encoded, encoding: .utf8) {
+                updatedLines.append(jsonString)
+            } else {
+                updatedLines.append(line)
+            }
+        }
+
+        if anyUpdated {
+            let newContent = updatedLines.joined(separator: "\n") + "\n"
+            try? newContent.write(to: file, atomically: true, encoding: .utf8)
+        }
+    }
+
     func endSession() {
         try? fileHandle?.close()
         fileHandle = nil

@@ -28,6 +28,7 @@ enum TranscriptionModel: String, CaseIterable, Identifiable {
     case whisperSmall
     case whisperLargeV3
     case whisperLargeV3Turbo
+    case cohereTranscribe
 
     var id: String { rawValue }
 
@@ -40,6 +41,7 @@ enum TranscriptionModel: String, CaseIterable, Identifiable {
         case .whisperSmall: "Whisper Small"
         case .whisperLargeV3: "Whisper Large v3"
         case .whisperLargeV3Turbo: "Whisper Large v3 Turbo"
+        case .cohereTranscribe: "Cohere Transcribe"
         }
     }
 
@@ -57,6 +59,8 @@ enum TranscriptionModel: String, CaseIterable, Identifiable {
             "Whisper Large v3 requires a one-time model download (~3.1 GB)."
         case .whisperLargeV3Turbo:
             "Whisper Large v3 Turbo requires a one-time model download (~1.6 GB)."
+        case .cohereTranscribe:
+            "Cohere Transcribe requires a one-time model download (~1.1 GB)."
         }
     }
 
@@ -64,7 +68,7 @@ enum TranscriptionModel: String, CaseIterable, Identifiable {
         switch self {
         case .qwen3ASR06B:
             true
-        case .parakeetV2, .parakeetV3, .whisperBase, .whisperSmall, .whisperLargeV3, .whisperLargeV3Turbo:
+        case .parakeetV2, .parakeetV3, .whisperBase, .whisperSmall, .whisperLargeV3, .whisperLargeV3Turbo, .cohereTranscribe:
             false
         }
     }
@@ -73,7 +77,7 @@ enum TranscriptionModel: String, CaseIterable, Identifiable {
         switch self {
         case .qwen3ASR06B:
             "Language Hint"
-        case .parakeetV2, .parakeetV3, .whisperBase, .whisperSmall, .whisperLargeV3, .whisperLargeV3Turbo:
+        case .parakeetV2, .parakeetV3, .whisperBase, .whisperSmall, .whisperLargeV3, .whisperLargeV3Turbo, .cohereTranscribe:
             "Locale"
         }
     }
@@ -90,6 +94,8 @@ enum TranscriptionModel: String, CaseIterable, Identifiable {
             "Whisper auto-detects the spoken language. Locale changes do not affect this model."
         case .whisperLargeV3, .whisperLargeV3Turbo:
             "Whisper Large v3 supports 99 languages with auto-detection. Best for multilingual meetings."
+        case .cohereTranscribe:
+            "Cohere Transcribe supports 14 languages. #1 on Open ASR Leaderboard (5.42% WER)."
         }
     }
 
@@ -116,6 +122,8 @@ enum TranscriptionModel: String, CaseIterable, Identifiable {
             96_000  // 6 seconds
         case .whisperLargeV3Turbo:
             80_000  // 5 seconds
+        case .cohereTranscribe:
+            96_000  // 6 seconds (2B model benefits from longer segments)
         }
     }
 
@@ -128,6 +136,7 @@ enum TranscriptionModel: String, CaseIterable, Identifiable {
         case .whisperSmall: return WhisperKitBackend(variant: .small, customVocabulary: customVocabulary)
         case .whisperLargeV3: return WhisperKitBackend(variant: .largeV3, customVocabulary: customVocabulary)
         case .whisperLargeV3Turbo: return WhisperKitBackend(variant: .largeV3Turbo, customVocabulary: customVocabulary)
+        case .cohereTranscribe: return CohereTranscribeBackend()
         }
     }
 }
@@ -445,6 +454,20 @@ final class AppSettings {
         }
     }
 
+    /// When true, a high-accuracy batch re-transcription pass runs after each session
+    /// using Cohere Transcribe (CoreML). Requires audio recording to be enabled.
+    /// Only available on machines with 16 GB+ RAM (INT4 quantized model ~1.1 GB).
+    @ObservationIgnored nonisolated(unsafe) private var _enableBatchRefinement: Bool
+    var enableBatchRefinement: Bool {
+        get { access(keyPath: \.enableBatchRefinement); return _enableBatchRefinement }
+        set {
+            withMutation(keyPath: \.enableBatchRefinement) {
+                _enableBatchRefinement = newValue
+                defaults.set(newValue, forKey: "enableBatchRefinement")
+            }
+        }
+    }
+
     /// When true, Apple's voice-processing IO is enabled on the mic input to cancel
     /// speaker echo and reduce double-transcription when using built-in speakers + mic.
     @ObservationIgnored nonisolated(unsafe) private var _enableEchoCancellation: Bool
@@ -595,6 +618,7 @@ final class AppSettings {
         self._openAIEmbedModel = defaults.string(forKey: "openAIEmbedModel") ?? "text-embedding-3-small"
         self._hasAcknowledgedRecordingConsent = defaults.bool(forKey: "hasAcknowledgedRecordingConsent")
         self._saveAudioRecording = defaults.bool(forKey: "saveAudioRecording")
+        self._enableBatchRefinement = defaults.bool(forKey: "enableBatchRefinement")
         self._enableTranscriptRefinement = defaults.bool(forKey: "enableTranscriptRefinement")
 
         // Echo cancellation — default to enabled

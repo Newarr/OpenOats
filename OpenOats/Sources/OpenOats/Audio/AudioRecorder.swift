@@ -13,6 +13,10 @@ final class AudioRecorder: @unchecked Sendable {
     private var micWriteCount = 0
     private var sysWriteCount = 0
 
+    /// When true, separate mic and system M4A files are saved alongside the merged file.
+    /// Used by batch re-transcription for per-channel speaker-aware processing.
+    var savePerChannelAudio = false
+
     init(outputDirectory: URL) {
         self.outputDirectory = outputDirectory
     }
@@ -199,6 +203,41 @@ final class AudioRecorder: @unchecked Sendable {
         }
 
         diagLog("[RECORDER] Saved \(outputURL.lastPathComponent) (\(length) frames)")
+
+        // Save per-channel files for batch re-transcription speaker alignment
+        if savePerChannelAudio {
+            encodeChannelM4A(samples: micSamples, name: "\(timestamp)_mic.m4a", dir: dir, targetFormat: targetFormat, targetRate: targetRate)
+            encodeChannelM4A(samples: sysSamples, name: "\(timestamp)_sys.m4a", dir: dir, targetFormat: targetFormat, targetRate: targetRate)
+        }
+    }
+
+    private func encodeChannelM4A(samples: [Float], name: String, dir: URL, targetFormat: AVAudioFormat, targetRate: Double) {
+        guard !samples.isEmpty else { return }
+        let url = dir.appendingPathComponent(name)
+        guard let file = try? AVAudioFile(
+            forWriting: url,
+            settings: [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: targetRate,
+                AVNumberOfChannelsKey: 1,
+                AVEncoderBitRateKey: 128_000,
+            ],
+            commonFormat: .pcmFormatFloat32,
+            interleaved: false
+        ) else { return }
+
+        let chunkSize = 65_536
+        var offset = 0
+        while offset < samples.count {
+            let count = min(chunkSize, samples.count - offset)
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: AVAudioFrameCount(count)),
+                  let out = buffer.floatChannelData?[0] else { break }
+            buffer.frameLength = AVAudioFrameCount(count)
+            for i in 0..<count { out[i] = samples[offset + i] }
+            do { try file.write(from: buffer) } catch { break }
+            offset += count
+        }
+        diagLog("[RECORDER] Saved per-channel \(name) (\(samples.count) frames)")
     }
 
     private static func readAllMono(file: AVAudioFile?, targetRate: Double, targetFormat: AVAudioFormat) -> [Float] {
