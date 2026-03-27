@@ -328,7 +328,7 @@ final class AppCoordinator {
             let capturedIndex = index
             let store = sessionStore
 
-            batchTranscriptionTask = Task.detached(priority: .utility) { [weak self] in
+            batchTranscriptionTask = Task.detached(priority: .utility) {
                 do {
                     let engine = BatchTranscriptionEngine()
                     try await engine.prepare { status in
@@ -336,33 +336,50 @@ final class AppCoordinator {
                     }
                     let segments = try await engine.transcribe(
                         audioURL: audioURL,
-                        locale: capturedLocale
+                        locale: capturedLocale,
+                        onProgress: { done, total in
+                            diagLog("[BATCH] Progress: \(done)/\(total) chunks")
+                        }
                     )
+
+                    guard !segments.isEmpty else {
+                        diagLog("[BATCH] No segments produced, skipping refinement")
+                        return
+                    }
 
                     // Backfill refined text from batch segments into the session JSONL
                     let records = await store.loadTranscript(sessionID: capturedSessionID)
-                    if !records.isEmpty && !segments.isEmpty {
-                        let refined = Self.alignBatchSegments(
-                            segments: segments,
-                            originalRecords: records,
-                            sessionStart: capturedIndex.startedAt
-                        )
-                        await store.backfillBatchRefinedText(
-                            sessionID: capturedSessionID,
-                            refinedRecords: refined
-                        )
-
-                        // Regenerate Markdown with batch-refined text
-                        let updatedRecords = await store.loadTranscript(sessionID: capturedSessionID)
-                        MarkdownMeetingWriter.write(
-                            metadata: .init(from: capturedIndex),
-                            records: updatedRecords,
-                            outputDirectory: capturedOutputDir
-                        )
-                        diagLog("[BATCH] Session \(capturedSessionID) batch refinement complete")
+                    guard !records.isEmpty else {
+                        diagLog("[BATCH] No records found for session \(capturedSessionID)")
+                        return
                     }
+
+                    let refined = Self.alignBatchSegments(
+                        segments: segments,
+                        originalRecords: records,
+                        sessionStart: capturedIndex.startedAt
+                    )
+                    guard !refined.isEmpty else {
+                        diagLog("[BATCH] No segments aligned to records, skipping backfill")
+                        return
+                    }
+
+                    await store.backfillBatchRefinedText(
+                        sessionID: capturedSessionID,
+                        refinedRecords: refined
+                    )
+                    diagLog("[BATCH] Backfilled \(refined.count)/\(records.count) records")
+
+                    // Regenerate Markdown with batch-refined text
+                    let updatedRecords = await store.loadTranscript(sessionID: capturedSessionID)
+                    MarkdownMeetingWriter.write(
+                        metadata: .init(from: capturedIndex),
+                        records: updatedRecords,
+                        outputDirectory: capturedOutputDir
+                    )
+                    diagLog("[BATCH] Session \(capturedSessionID) batch refinement complete")
                 } catch {
-                    diagLog("[BATCH] Batch transcription failed: \(error)")
+                    diagLog("[BATCH] Failed: \(error.localizedDescription)")
                 }
             }
         }
@@ -370,20 +387,30 @@ final class AppCoordinator {
 
     /// Align batch transcription segments with original utterances by timestamp,
     /// preserving the original speaker labels while using batch text for accuracy.
+    ///
+    /// Each original record is matched to the batch segment whose time range
+    /// contains the record's timestamp. When multiple records fall within one
+    /// batch segment, they all receive that segment's text (the caller can
+    /// split later if needed). Records with no matching segment are skipped.
     private static func alignBatchSegments(
         segments: [BatchSegment],
         originalRecords: [SessionRecord],
         sessionStart: Date
     ) -> [(index: Int, refinedText: String)] {
+        // Pre-sort segments by start time for efficient lookup
+        let sorted = segments.sorted { $0.startTime < $1.startTime }
         var results: [(index: Int, refinedText: String)] = []
 
         for (recordIndex, record) in originalRecords.enumerated() {
             let recordOffset = record.timestamp.timeIntervalSince(sessionStart)
 
-            // Find the batch segment whose time range overlaps this utterance
-            if let match = segments.first(where: {
-                recordOffset >= $0.startTime - 1.0 && recordOffset < $0.endTime + 1.0
-            }) {
+            // Find the best-matching segment using binary-search-like scan.
+            // Allow ±0.5s tolerance for timestamp drift between live and batch.
+            let match = sorted.first { seg in
+                recordOffset >= seg.startTime - 0.5 && recordOffset < seg.endTime + 0.5
+            }
+
+            if let match {
                 results.append((index: recordIndex, refinedText: match.text))
             }
         }
