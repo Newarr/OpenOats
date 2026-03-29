@@ -8,10 +8,10 @@ import os
 @MainActor
 final class DeviceRoutingManager {
     /// Called when a mic restart is requested with the target device ID.
-    var onMicRestartRequested: (@Sendable (AudioDeviceID) -> Void)?
+    var onMicRestartRequested: (@Sendable (AudioDeviceID) async -> Void)?
 
     /// Called when a system audio restart is requested.
-    var onSystemRestartRequested: (@Sendable () -> Void)?
+    var onSystemRestartRequested: (@Sendable () async -> Void)?
 
     /// Tracks whether user selected "System Default" (0) or a specific device.
     private var userSelectedDeviceID: AudioDeviceID = 0
@@ -105,9 +105,13 @@ final class DeviceRoutingManager {
 
     deinit {
         // Ensure cleanup happens even if stopListening wasn't called explicitly
+        // Dispatch to MainActor since these methods are MainActor-isolated
         if isListening {
-            removeDefaultDeviceListener()
-            removeDefaultOutputDeviceListener()
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.removeDefaultDeviceListener()
+                self.removeDefaultOutputDeviceListener()
+            }
         }
     }
 
@@ -282,7 +286,7 @@ final class DeviceRoutingManager {
 
         // Notify the engine to perform the actual restart
         // Note: State is updated only after successful restart via updateCurrentDeviceID
-        onMicRestartRequested?(targetMicID)
+        await onMicRestartRequested?(targetMicID)
     }
 
     private func performSystemAudioRestart() async {
@@ -291,7 +295,7 @@ final class DeviceRoutingManager {
         Log.transcription.info("restarting system audio stream")
 
         // Notify the engine to perform the actual restart
-        onSystemRestartRequested?()
+        await onSystemRestartRequested?()
     }
 
     // MARK: - Device Resolution
