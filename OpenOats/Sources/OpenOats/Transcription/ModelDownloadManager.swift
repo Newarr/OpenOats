@@ -64,6 +64,10 @@ final class ModelDownloadManager {
             throw TranscriptionBackendError.notPrepared
         }
 
+        // Recompute availability based on the model parameter, not cached flag
+        let modelNeedsDownload = Self.modelNeedsDownload(model)
+        self.needsDownload = modelNeedsDownload
+
         isLoading = true
         defer {
             isLoading = false
@@ -74,7 +78,7 @@ final class ModelDownloadManager {
             downloadTotalBytes = nil
         }
 
-        let isDownloading = needsDownload
+        let isDownloading = modelNeedsDownload
 
         if isDownloading {
             downloadProgress = 0
