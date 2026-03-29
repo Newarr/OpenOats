@@ -1,4 +1,5 @@
 import CoreAudio
+import FluidAudio
 import Foundation
 import os
 
@@ -92,6 +93,14 @@ final class DeviceRoutingManager {
         sysRestartTask = nil
         pendingMicDeviceID = nil
         pendingSystemAudioRestart = false
+
+        // Clear restart state to free heavy objects (VadManager, backends)
+        currentLocale = nil
+        currentVadManager = nil
+        currentMicBackend = nil
+        currentSystemBackend = nil
+        currentFlushInterval = nil
+        currentTranscriptStore = nil
     }
 
     deinit {

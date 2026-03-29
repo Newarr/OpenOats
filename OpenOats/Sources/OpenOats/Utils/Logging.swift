@@ -1,6 +1,13 @@
 import Foundation
 import os
 
+/// Centralized logger factory. One subsystem, per-component categories.
+///
+/// Usage: `Log.mic.debug("buffer received")`
+///
+/// Filter in Terminal:
+///   log stream --predicate 'subsystem == "com.openoats.app"' --level debug
+///   log stream --predicate 'subsystem == "com.openoats.app" AND category == "MicCapture"'
 enum Log {
     static let mic = Logger(subsystem: subsystem, category: "MicCapture")
     static let recorder = Logger(subsystem: subsystem, category: "AudioRecorder")
