@@ -28,8 +28,13 @@ enum TranscriptionStreamError: LocalizedError {
 /// Manages the lifecycle of mic and system audio transcription tasks.
 @MainActor
 final class TranscriptionStreamCoordinator {
-    private let micCapture = MicCapture()
-    private let systemCapture = SystemAudioCapture()
+    private let micCapture: MicCapture
+    private let systemCapture: SystemAudioCapture
+
+    init(micCapture: MicCapture = MicCapture(), systemCapture: SystemAudioCapture = SystemAudioCapture()) {
+        self.micCapture = micCapture
+        self.systemCapture = systemCapture
+    }
 
     /// Audio recorder for tapping streams (set externally when recording is enabled).
     weak var audioRecorder: AudioRecorder?
@@ -184,14 +189,12 @@ final class TranscriptionStreamCoordinator {
             let (diarTapped, diarContinuation) = AsyncStream<AVAudioPCMBuffer>.makeStream(bufferingPolicy: .bufferingNewest(1))
 
             diarizationTask?.cancel()
-            diarizationTask = Task { [weak self] in
-                nonisolated(unsafe) let safeDm = dm
+            diarizationTask = Task { [weak self, dm] in
                 var diarBuf: [Float] = []
                 for await buffer in originalSysStream {
                     // Check for cancellation
                     guard !Task.isCancelled else { break }
-                    nonisolated(unsafe) let b = buffer
-                    diarContinuation.yield(b)
+                    diarContinuation.yield(buffer)
                     guard let channelData = buffer.floatChannelData else { continue }
                     let frameCount = Int(buffer.frameLength)
                     sysAudioTime.add(Double(frameCount) / buffer.format.sampleRate)
@@ -199,12 +202,12 @@ final class TranscriptionStreamCoordinator {
                     if diarBuf.count >= diarFlushSize {
                         let batch = diarBuf
                         diarBuf.removeAll(keepingCapacity: true)
-                        try? await safeDm.feedAudio(batch)
+                        try? await dm.feedAudio(batch)
                     }
                 }
                 // Flush tail
                 if !Task.isCancelled, !diarBuf.isEmpty {
-                    try? await safeDm.feedAudio(diarBuf)
+                    try? await dm.feedAudio(diarBuf)
                 }
                 diarContinuation.finish()
                 self?.diarizationTask = nil
@@ -358,14 +361,11 @@ final class TranscriptionStreamCoordinator {
         _ stream: AsyncStream<AVAudioPCMBuffer>,
         tap: @escaping @Sendable (AVAudioPCMBuffer) -> Void
     ) -> AsyncStream<AVAudioPCMBuffer> {
-        struct Box: @unchecked Sendable { let stream: AsyncStream<AVAudioPCMBuffer> }
-        let box = Box(stream: stream)
         let (output, continuation) = AsyncStream<AVAudioPCMBuffer>.makeStream(bufferingPolicy: .bufferingNewest(1))
         Task {
-            for await buffer in box.stream {
+            for await buffer in stream {
                 tap(buffer)
-                nonisolated(unsafe) let b = buffer
-                continuation.yield(b)
+                continuation.yield(buffer)
             }
             continuation.finish()
         }
