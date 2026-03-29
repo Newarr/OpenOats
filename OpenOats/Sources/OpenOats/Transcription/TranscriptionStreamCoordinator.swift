@@ -39,6 +39,9 @@ final class TranscriptionStreamCoordinator {
     /// Audio recorder for tapping streams (set externally when recording is enabled).
     weak var audioRecorder: AudioRecorder?
 
+    /// Called when mic health check detects no audio after timeout.
+    var onMicHealthCheckFailed: (@Sendable () -> Void)?
+
     /// Combined audio level (mic + system) for the UI meter.
     nonisolated var audioLevel: Float {
         max(micCapture.audioLevel, systemCapture.audioLevel)
@@ -122,6 +125,7 @@ final class TranscriptionStreamCoordinator {
             guard let self, self.isMicRunning else { return }
             if !self.micCapture.hasCapturedFrames && self.micCapture.captureError == nil {
                 Log.transcription.error("no mic audio after 5s")
+                self.onMicHealthCheckFailed?()
             }
         }
 
@@ -186,24 +190,29 @@ final class TranscriptionStreamCoordinator {
         if let dm = diarizationManager {
             let diarFlushSize = 16000
             let originalSysStream = sysStream
-            let (diarTapped, diarContinuation) = AsyncStream<AVAudioPCMBuffer>.makeStream(bufferingPolicy: .bufferingNewest(1))
+            let (diarTapped, diarContinuation) = AsyncStream<AVAudioPCMBuffer>.makeStream(bufferingPolicy: .bufferingOldest(128))
 
             diarizationTask?.cancel()
             diarizationTask = Task { [weak self, dm] in
                 var diarBuf: [Float] = []
                 for await buffer in originalSysStream {
+                    // AVAudioPCMBuffer is non-Sendable but used read-only here.
+                    // nonisolated(unsafe) lets us read then yield without copying.
+                    nonisolated(unsafe) let buffer = buffer
                     // Check for cancellation
                     guard !Task.isCancelled else { break }
-                    diarContinuation.yield(buffer)
-                    guard let channelData = buffer.floatChannelData else { continue }
-                    let frameCount = Int(buffer.frameLength)
-                    sysAudioTime.add(Double(frameCount) / buffer.format.sampleRate)
-                    diarBuf.append(contentsOf: UnsafeBufferPointer(start: channelData[0], count: frameCount))
-                    if diarBuf.count >= diarFlushSize {
-                        let batch = diarBuf
-                        diarBuf.removeAll(keepingCapacity: true)
-                        try? await dm.feedAudio(batch)
+                    if let channelData = buffer.floatChannelData {
+                        let frameCount = Int(buffer.frameLength)
+                        let sampleRate = buffer.format.sampleRate
+                        sysAudioTime.add(Double(frameCount) / sampleRate)
+                        diarBuf.append(contentsOf: UnsafeBufferPointer(start: channelData[0], count: frameCount))
+                        if diarBuf.count >= diarFlushSize {
+                            let batch = diarBuf
+                            diarBuf.removeAll(keepingCapacity: true)
+                            try? await dm.feedAudio(batch)
+                        }
                     }
+                    diarContinuation.yield(buffer)
                 }
                 // Flush tail
                 if !Task.isCancelled, !diarBuf.isEmpty {
@@ -246,14 +255,15 @@ final class TranscriptionStreamCoordinator {
     /// Stop the system audio stream and transcription.
     func stopSystemStream() {
         diarizationTask?.cancel()
+        diarizationTask = nil
         systemCapture.finishStream()
         sysTask?.cancel()
         sysTask = nil
-        Task {
-            await diarizationTask?.value
-            await systemCapture.stop()
-            diarizationTask = nil
-        }
+        // systemCapture.stop() is async but non-critical for synchronous teardown.
+        // finishStream() already ends the audio stream; stop() releases the process tap.
+        // Safe to fire-and-forget since startSystemStream() calls bufferStream()
+        // which internally awaits any pending stop.
+        Task { await systemCapture.stop() }
     }
 
     /// Finalize system stream, waiting for transcriber to drain.
@@ -361,14 +371,25 @@ final class TranscriptionStreamCoordinator {
         _ stream: AsyncStream<AVAudioPCMBuffer>,
         tap: @escaping @Sendable (AVAudioPCMBuffer) -> Void
     ) -> AsyncStream<AVAudioPCMBuffer> {
-        let (output, continuation) = AsyncStream<AVAudioPCMBuffer>.makeStream(bufferingPolicy: .bufferingNewest(1))
-        Task {
+        let (output, continuation) = AsyncStream<AVAudioPCMBuffer>.makeStream(bufferingPolicy: .bufferingOldest(128))
+        let forwarder = TapForwarder(stream: stream, continuation: continuation, tap: tap)
+        Task { await forwarder.run() }
+        return output
+    }
+
+    /// Wraps the iteration in a Sendable closure to satisfy strict concurrency on the Task capture.
+    private struct TapForwarder: Sendable {
+        nonisolated(unsafe) let stream: AsyncStream<AVAudioPCMBuffer>
+        let continuation: AsyncStream<AVAudioPCMBuffer>.Continuation
+        let tap: @Sendable (AVAudioPCMBuffer) -> Void
+
+        func run() async {
             for await buffer in stream {
+                nonisolated(unsafe) let buffer = buffer
                 tap(buffer)
                 continuation.yield(buffer)
             }
             continuation.finish()
         }
-        return output
     }
 }

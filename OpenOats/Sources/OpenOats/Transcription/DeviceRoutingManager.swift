@@ -7,6 +7,10 @@ import os
 /// when the default input or output device changes.
 @MainActor
 final class DeviceRoutingManager {
+    /// Shared queue for all CoreAudio property listener registrations.
+    /// Must use the same queue instance for Add and Remove calls.
+    private static let listenerQueue = DispatchQueue(label: "com.openoats.device-routing", qos: .utility)
+
     /// Called when a mic restart is requested with the target device ID.
     var onMicRestartRequested: (@Sendable (AudioDeviceID) async -> Void)?
 
@@ -103,17 +107,10 @@ final class DeviceRoutingManager {
         currentTranscriptStore = nil
     }
 
-    deinit {
-        // Ensure cleanup happens even if stopListening wasn't called explicitly
-        // Dispatch to MainActor since these methods are MainActor-isolated
-        if isListening {
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.removeDefaultDeviceListener()
-                self.removeDefaultOutputDeviceListener()
-            }
-        }
-    }
+    // No deinit: Swift 6 strict concurrency prevents accessing non-Sendable
+    // AudioObjectPropertyListenerBlock from nonisolated deinit. The original
+    // deinit used [weak self] which was always nil anyway.
+    // Contract: callers MUST call stopListening() before releasing this object.
 
     /// Request a mic restart with a new device.
     /// Pass 0 to use the system default device.
@@ -185,9 +182,6 @@ final class DeviceRoutingManager {
             mElement: kAudioObjectPropertyElementMain
         )
 
-        // Use a background queue for the CoreAudio callback, then hop to MainActor via Task
-        let queue = DispatchQueue.global(qos: .utility)
-
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             guard let self else { return }
             Task { @MainActor in
@@ -201,7 +195,7 @@ final class DeviceRoutingManager {
         AudioObjectAddPropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject),
             &address,
-            queue,
+            DeviceRoutingManager.listenerQueue,
             block
         )
     }
@@ -216,7 +210,7 @@ final class DeviceRoutingManager {
         AudioObjectRemovePropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject),
             &address,
-            DispatchQueue.global(qos: .utility),
+            DeviceRoutingManager.listenerQueue,
             block
         )
         defaultDeviceListenerBlock = nil
@@ -231,8 +225,6 @@ final class DeviceRoutingManager {
             mElement: kAudioObjectPropertyElementMain
         )
 
-        let queue = DispatchQueue.global(qos: .utility)
-
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             guard let self else { return }
             Task { @MainActor in
@@ -244,7 +236,7 @@ final class DeviceRoutingManager {
         AudioObjectAddPropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject),
             &address,
-            queue,
+            DeviceRoutingManager.listenerQueue,
             block
         )
     }
@@ -259,7 +251,7 @@ final class DeviceRoutingManager {
         AudioObjectRemovePropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject),
             &address,
-            DispatchQueue.global(qos: .utility),
+            DeviceRoutingManager.listenerQueue,
             block
         )
         defaultOutputDeviceListenerBlock = nil

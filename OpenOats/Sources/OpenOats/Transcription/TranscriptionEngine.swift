@@ -102,8 +102,6 @@ final class TranscriptionEngine {
         set { streamCoordinator.isMicMuted = newValue }
     }
 
-    private var micTask: Task<Void, Never>?
-    private var sysTask: Task<Void, Never>?
     /// Keeps the mic stream alive for the audio level meter when transcription isn't running.
     private var micKeepAliveTask: Task<Void, Never>?
 
@@ -134,12 +132,30 @@ final class TranscriptionEngine {
         self.deviceRoutingManager = DeviceRoutingManager()
         self.streamCoordinator = TranscriptionStreamCoordinator()
 
-        // Wire up callbacks
+        // Wire download progress to observable properties
+        self.modelDownloadManager.onStatusUpdate = { [weak self] status in
+            Task { @MainActor in self?.assetStatus = status }
+        }
+        self.modelDownloadManager.onProgressUpdate = { [weak self] fraction in
+            Task { @MainActor in
+                self?.downloadProgress = fraction
+                self?.downloadDetail = self?.modelDownloadManager.downloadDetail
+            }
+        }
+
+        // Wire up device routing callbacks
         self.deviceRoutingManager.onMicRestartRequested = { [weak self] deviceID in
             await self?.performMicRestart(deviceID: deviceID)
         }
         self.deviceRoutingManager.onSystemRestartRequested = { [weak self] in
             await self?.performSystemAudioRestart()
+        }
+
+        // Wire mic health check callback
+        self.streamCoordinator.onMicHealthCheckFailed = { [weak self] in
+            Task { @MainActor in
+                self?.lastError = "Microphone is not producing audio. Check your input device in System Settings."
+            }
         }
 
         switch mode {
@@ -208,17 +224,16 @@ final class TranscriptionEngine {
             self.micBackend = backends.mic
             self.systemBackend = backends.system
         } catch {
-            lastError = "Failed to load models: \(error.localizedDescription)"
+            lastError = "Failed to load models: \(error)"
             assetStatus = "Ready"
             isRunning = false
             modelDownloadManager.clearCache(for: settings.transcriptionModel)
+            needsModelDownload = true
+            downloadConfirmed = false
             return
         }
 
-        // Sync observable properties from manager
         self.needsModelDownload = modelDownloadManager.needsDownload
-        self.downloadProgress = modelDownloadManager.downloadProgress
-        self.downloadDetail = modelDownloadManager.downloadDetail
 
         // Load VAD model
         assetStatus = "Loading VAD model..."
@@ -256,6 +271,7 @@ final class TranscriptionEngine {
         Log.transcription.info("Transcription model loaded")
 
         guard let vadManager else { return }
+        guard let micBackend, let systemBackend else { return }
 
         // 2. Resolve mic device and start listening for device changes
         guard let targetMicID = deviceRoutingManager.resolvedMicDeviceID(for: inputDeviceID) else {
@@ -281,15 +297,15 @@ final class TranscriptionEngine {
         let micResult = streamCoordinator.startMicStream(
             locale: locale,
             deviceID: targetMicID,
-            backend: micBackend!,
+            backend: micBackend,
             vadManager: vadManager,
             transcriptStore: transcriptStore,
             flushInterval: settings.transcriptionModel.flushIntervalSamples,
             useAEC: useAEC
         )
         switch micResult {
-        case .success(let task):
-            self.micTask = task
+        case .success:
+            break
         case .failure(let error):
             lastError = error.localizedDescription
             isRunning = false
@@ -299,28 +315,28 @@ final class TranscriptionEngine {
         // 4. Start system audio stream via coordinator
         let sysResult = await streamCoordinator.startSystemStream(
             locale: locale,
-            backend: systemBackend!,
+            backend: systemBackend,
             vadManager: vadManager,
             diarizationManager: diarizationManager,
             transcriptStore: transcriptStore,
             flushInterval: settings.transcriptionModel.flushIntervalSamples
         )
         switch sysResult {
-        case .success(let task):
-            self.sysTask = task
+        case .success:
+            break
         case .failure(let error):
             lastError = error.localizedDescription
         }
 
-        assetStatus = "Transcribing (\(micBackend?.displayName ?? transcriptionModel.displayName))"
+        assetStatus = "Transcribing (\(micBackend.displayName))"
         Log.transcription.info("All transcription tasks started")
 
         // Store state for restarts
         deviceRoutingManager.storeRestartState(
             locale: locale,
             vadManager: vadManager,
-            micBackend: micBackend!,
-            systemBackend: systemBackend!,
+            micBackend: micBackend,
+            systemBackend: systemBackend,
             flushInterval: settings.transcriptionModel.flushIntervalSamples,
             transcriptStore: transcriptStore
         )
@@ -384,8 +400,6 @@ final class TranscriptionEngine {
 
         micBackend = nil
         systemBackend = nil
-        micTask = nil
-        sysTask = nil
         transcriptStore.volatileYouText = ""
         transcriptStore.volatileThemText = ""
 
@@ -416,8 +430,6 @@ final class TranscriptionEngine {
         // Stop streams via coordinator
         streamCoordinator.stopAll()
 
-        micTask = nil
-        sysTask = nil
         micBackend = nil
         systemBackend = nil
         diarizationManager = nil
@@ -446,7 +458,6 @@ final class TranscriptionEngine {
 
         // Stop current mic stream
         streamCoordinator.stopMicStream()
-        micTask = nil
 
         if Task.isCancelled || !isRunning {
             return
@@ -464,8 +475,7 @@ final class TranscriptionEngine {
             useAEC: false
         )
         switch micResult {
-        case .success(let task):
-            self.micTask = task
+        case .success:
             deviceRoutingManager.updateCurrentDeviceID(targetMicID, isUserSelection: false)
             lastError = nil
             Log.transcription.info("Mic restarted on device \(targetMicID, privacy: .public)")
@@ -481,7 +491,6 @@ final class TranscriptionEngine {
 
         // Stop current system stream
         await streamCoordinator.finalizeSystemStream()
-        sysTask = nil
 
         if Task.isCancelled || !isRunning {
             return
@@ -498,8 +507,12 @@ final class TranscriptionEngine {
             flushInterval: deviceRoutingManager.currentFlushInterval ?? settings.transcriptionModel.flushIntervalSamples
         )
         switch sysResult {
-        case .success(let task):
-            self.sysTask = task
+        case .success:
+            // Clear any previous system audio errors
+            if let lastError, lastError.localizedCaseInsensitiveContains("system audio") ||
+               lastError.localizedCaseInsensitiveContains("audio output device") {
+                self.lastError = nil
+            }
             Log.transcription.info("System audio stream restarted")
         case .failure(let error):
             lastError = error.localizedDescription
@@ -528,11 +541,4 @@ final class TranscriptionEngine {
         return identifier.split(separator: "-").first.map { String($0).lowercased() }
     }
 
-    private func clearSystemAudioErrorIfPresent() {
-        guard let lastError else { return }
-        if lastError.localizedCaseInsensitiveContains("system audio") ||
-            lastError.localizedCaseInsensitiveContains("audio output device") {
-            self.lastError = nil
-        }
-    }
 }
