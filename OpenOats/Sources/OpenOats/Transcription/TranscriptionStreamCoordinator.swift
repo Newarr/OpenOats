@@ -34,6 +34,9 @@ final class TranscriptionStreamCoordinator {
     /// Health check task for mic audio.
     private var micHealthTask: Task<Void, Never>?
 
+    /// Diarization audio feed task.
+    private var diarizationTask: Task<Void, Never>?
+
     /// Track if mic is currently running for health checks.
     private var isMicRunning = false
 
@@ -152,10 +155,13 @@ final class TranscriptionStreamCoordinator {
             let originalSysStream = sysStream
             let (diarTapped, diarContinuation) = AsyncStream<AVAudioPCMBuffer>.makeStream()
 
-            Task {
+            diarizationTask?.cancel()
+            diarizationTask = Task { [weak self] in
                 nonisolated(unsafe) let safeDm = dm
                 var diarBuf: [Float] = []
                 for await buffer in originalSysStream {
+                    // Check for cancellation
+                    guard !Task.isCancelled else { break }
                     nonisolated(unsafe) let b = buffer
                     diarContinuation.yield(b)
                     guard let channelData = buffer.floatChannelData else { continue }
@@ -169,10 +175,11 @@ final class TranscriptionStreamCoordinator {
                     }
                 }
                 // Flush tail
-                if !diarBuf.isEmpty {
+                if !Task.isCancelled, !diarBuf.isEmpty {
                     try? await safeDm.feedAudio(diarBuf)
                 }
                 diarContinuation.finish()
+                self?.diarizationTask = nil
             }
             sysStream = diarTapped
         }
@@ -207,18 +214,26 @@ final class TranscriptionStreamCoordinator {
 
     /// Stop the system audio stream and transcription.
     func stopSystemStream() {
+        diarizationTask?.cancel()
         systemCapture.finishStream()
         sysTask?.cancel()
         sysTask = nil
-        Task { await systemCapture.stop() }
+        Task {
+            await diarizationTask?.value
+            await systemCapture.stop()
+            diarizationTask = nil
+        }
     }
 
     /// Finalize system stream, waiting for transcriber to drain.
     func finalizeSystemStream() async {
+        diarizationTask?.cancel()
         systemCapture.finishStream()
         await sysTask?.value
+        await diarizationTask?.value
         await systemCapture.stop()
         sysTask = nil
+        diarizationTask = nil
     }
 
     /// Stop all audio streams and transcription.
@@ -232,17 +247,21 @@ final class TranscriptionStreamCoordinator {
         micHealthTask?.cancel()
         micHealthTask = nil
 
+        diarizationTask?.cancel()
+
         micCapture.finishStream()
         systemCapture.finishStream()
 
         await micTask?.value
         await sysTask?.value
+        await diarizationTask?.value
 
         micCapture.stop()
         await systemCapture.stop()
 
         micTask = nil
         sysTask = nil
+        diarizationTask = nil
         isMicRunning = false
     }
 
