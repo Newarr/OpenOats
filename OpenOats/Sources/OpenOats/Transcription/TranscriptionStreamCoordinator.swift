@@ -3,6 +3,27 @@ import FluidAudio
 import Foundation
 import os
 
+/// Errors that can occur during stream coordination with user-facing messages.
+enum TranscriptionStreamError: LocalizedError {
+    case microphonePermissionDenied
+    case microphoneUnavailable
+    case systemAudioCaptureFailed(Error)
+    case transcriberCreationFailed(Speaker)
+
+    var errorDescription: String? {
+        switch self {
+        case .microphonePermissionDenied:
+            return "Microphone access was denied. Enable it in System Settings > Privacy & Security > Microphone."
+        case .microphoneUnavailable:
+            return "The selected microphone is no longer available."
+        case .systemAudioCaptureFailed:
+            return "System audio capture failed to start."
+        case .transcriberCreationFailed(let speaker):
+            return "Failed to create the \(speaker == .you ? "microphone" : "system audio") transcriber. Try restarting."
+        }
+    }
+}
+
 /// Coordinates audio stream capture, transcribers, and optional recording.
 /// Manages the lifecycle of mic and system audio transcription tasks.
 @MainActor
@@ -41,7 +62,7 @@ final class TranscriptionStreamCoordinator {
     private var isMicRunning = false
 
     /// Start the mic audio stream and transcription.
-    /// - Returns: The transcription task, or nil if setup failed
+    /// - Returns: The transcription task on success, or an error on failure
     @discardableResult
     func startMicStream(
         locale: Locale,
@@ -51,11 +72,18 @@ final class TranscriptionStreamCoordinator {
         transcriptStore: TranscriptStore,
         flushInterval: Int,
         useAEC: Bool
-    ) -> Task<Void, Never>? {
+    ) -> Result<Task<Void, Never>, TranscriptionStreamError> {
         // Store state for potential restarts
         isMicRunning = true
 
         var micStream = micCapture.bufferStream(deviceID: deviceID, echoCancellation: useAEC)
+
+        // Check for immediate mic capture failure
+        if let micError = micCapture.captureError {
+            Log.transcription.error("Mic capture setup error: \(micError)")
+            isMicRunning = false
+            return .failure(.microphoneUnavailable)
+        }
 
         // Add recording tap if recorder is set
         if let recorder = audioRecorder {
@@ -74,7 +102,7 @@ final class TranscriptionStreamCoordinator {
         ) else {
             Log.transcription.error("Failed to create mic transcriber")
             isMicRunning = false
-            return nil
+            return .failure(.transcriberCreationFailed(.you))
         }
 
         micTask = Task { [weak self] in
@@ -92,7 +120,7 @@ final class TranscriptionStreamCoordinator {
             }
         }
 
-        return micTask
+        return .success(micTask!)
     }
 
     /// Mark mic as stopped - MainActor-isolated to prevent concurrency violations
@@ -123,7 +151,7 @@ final class TranscriptionStreamCoordinator {
     }
 
     /// Start the system audio stream and transcription.
-    /// - Returns: The transcription task, or nil if setup failed
+    /// - Returns: The transcription task on success, or an error on failure
     @discardableResult
     func startSystemStream(
         locale: Locale,
@@ -132,7 +160,7 @@ final class TranscriptionStreamCoordinator {
         diarizationManager: DiarizationManager?,
         transcriptStore: TranscriptStore,
         flushInterval: Int
-    ) async -> Task<Void, Never>? {
+    ) async -> Result<Task<Void, Never>, TranscriptionStreamError> {
         Log.transcription.info("starting system audio capture")
 
         let sysStreams: SystemAudioCapture.CaptureStreams
@@ -141,7 +169,7 @@ final class TranscriptionStreamCoordinator {
             Log.transcription.info("system audio capture started")
         } catch {
             Log.transcription.error("Failed to start system audio: \(error.localizedDescription, privacy: .public)")
-            return nil
+            return .failure(.systemAudioCaptureFailed(error))
         }
 
         var sysStream = sysStreams.systemAudio
@@ -153,7 +181,7 @@ final class TranscriptionStreamCoordinator {
         if let dm = diarizationManager {
             let diarFlushSize = 16000
             let originalSysStream = sysStream
-            let (diarTapped, diarContinuation) = AsyncStream<AVAudioPCMBuffer>.makeStream()
+            let (diarTapped, diarContinuation) = AsyncStream<AVAudioPCMBuffer>.makeStream(bufferingPolicy: .bufferingNewest(1))
 
             diarizationTask?.cancel()
             diarizationTask = Task { [weak self] in
@@ -202,14 +230,14 @@ final class TranscriptionStreamCoordinator {
             audioTime: diarizationManager != nil ? sysAudioTime : nil
         ) else {
             Log.transcription.error("Failed to create system audio transcriber")
-            return nil
+            return .failure(.transcriberCreationFailed(.them))
         }
 
         sysTask = Task {
             await sysTranscriber.run(stream: sysStream)
         }
 
-        return sysTask
+        return .success(sysTask!)
     }
 
     /// Stop the system audio stream and transcription.
@@ -332,7 +360,7 @@ final class TranscriptionStreamCoordinator {
     ) -> AsyncStream<AVAudioPCMBuffer> {
         struct Box: @unchecked Sendable { let stream: AsyncStream<AVAudioPCMBuffer> }
         let box = Box(stream: stream)
-        let (output, continuation) = AsyncStream<AVAudioPCMBuffer>.makeStream()
+        let (output, continuation) = AsyncStream<AVAudioPCMBuffer>.makeStream(bufferingPolicy: .bufferingNewest(1))
         Task {
             for await buffer in box.stream {
                 tap(buffer)
