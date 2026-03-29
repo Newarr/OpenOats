@@ -15,17 +15,6 @@ enum TranscriptionEngineError: LocalizedError {
     }
 }
 
-/// Enriched download progress info computed from fraction changes over time.
-struct DownloadProgressDetail: Sendable {
-    let fraction: Double
-    /// Formatted string like "142 MB / 800 MB"
-    let sizeText: String?
-    /// Formatted string like "3.5 MB/s"
-    let speedText: String?
-    /// Formatted string like "2m 15s remaining"
-    let etaText: String?
-}
-
 /// Orchestrates dual StreamingTranscriber instances for mic (you) and system audio (them).
 @Observable
 @MainActor
